@@ -4,11 +4,14 @@ import { Link, useLocation, useParams } from 'wouter';
 import {
   ArrowLeft,
   Building2,
+  Copy,
+  ExternalLink,
   FileText,
   Globe,
   Mail,
   Phone,
   Plus,
+  ShieldCheck,
   Sparkles,
   Star,
   Trash2,
@@ -21,10 +24,16 @@ import { LoadingState, ErrorState, EmptyState } from '../components/QueryState';
 import PriorityBadge from '../components/PriorityBadge';
 import ResearchStatusBadge from '../components/ResearchStatusBadge';
 import ResearchReviewPanel from '../components/ResearchReviewPanel';
+import ConfidenceBadge from '../components/ConfidenceBadge';
 import Modal from '../components/Modal';
 import ConfirmDialog from '../components/ConfirmDialog';
 import ContactForm, { type ContactFormValues } from '../components/ContactForm';
 import { useToast } from '../components/Toast';
+
+function formatDateTime(value: string | null | undefined): string | null {
+  if (!value) return null;
+  return new Date(value).toLocaleString();
+}
 
 function toContactPayload(values: ContactFormValues) {
   return {
@@ -186,6 +195,42 @@ export default function CountyDetail() {
     },
   });
 
+  const verifyContact = useMutation({
+    mutationFn: (contactId: number) => apiSend(`/api/contacts/${contactId}/verify`, 'POST', { provider: 'mock' }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['research-results', countyId] });
+      invalidateCounty();
+      toast.showSuccess('Research triggered — review the results to save any changes.');
+      setEditingContact(null);
+      setShowResearch(true);
+    },
+    onError: (error: unknown) => {
+      toast.showError(
+        error instanceof ApiError ? error.message : 'Failed to trigger AI verification for this contact.'
+      );
+    },
+  });
+
+  const markVerified = useMutation({
+    mutationFn: (contactId: number) => apiSend(`/api/tax-officials/${contactId}`, 'PATCH', { markVerified: true }),
+    onSuccess: () => {
+      invalidateCounty();
+      toast.showSuccess('Contact marked as verified.');
+    },
+    onError: (error: unknown) => {
+      toast.showError(error instanceof ApiError ? error.message : 'Failed to mark contact as verified.');
+    },
+  });
+
+  const copyEmail = async (email: string) => {
+    try {
+      await navigator.clipboard.writeText(email);
+      toast.showSuccess('Email address copied to clipboard.');
+    } catch {
+      toast.showError('Could not copy email address.');
+    }
+  };
+
   const createListRequest = useMutation({
     mutationFn: (taxOfficialId: number) =>
       apiSend('/api/list-requests', 'POST', { taxOfficialId, requestStatus: 'not_started' }),
@@ -331,14 +376,18 @@ export default function CountyDetail() {
         ) : (
           <div className="grid gap-3 md:grid-cols-2">
             {county.taxOfficials.map((contact) => (
-              <div key={contact.id} className="border rounded-lg p-4">
+              <div
+                key={contact.id}
+                className={`border rounded-lg p-4 ${contact.isPrimary ? 'bg-blue-50/50 border-blue-200' : ''}`}
+              >
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
-                      <span className="font-medium text-gray-900 truncate">{contact.fullName}</span>
+                      <span className={`text-gray-900 truncate ${contact.isPrimary ? 'font-bold' : 'font-medium'}`}>
+                        {contact.fullName}
+                      </span>
                       {contact.isPrimary && (
-                        <span className="inline-flex items-center gap-1 text-xs text-blue-700 bg-blue-50 px-2 py-0.5 rounded-full shrink-0">
-                          <Star className="w-3 h-3 fill-current" />
+                        <span className="inline-flex items-center gap-1 text-xs text-blue-700 bg-blue-100 px-2 py-0.5 rounded-full shrink-0">
                           Primary
                         </span>
                       )}
@@ -365,6 +414,14 @@ export default function CountyDetail() {
                       <a href={`mailto:${contact.emailAddress}`} className="text-blue-600 hover:text-blue-800 truncate">
                         {contact.emailAddress}
                       </a>
+                      <button
+                        onClick={() => copyEmail(contact.emailAddress!)}
+                        title="Copy email address"
+                        aria-label={`Copy email address for ${contact.fullName}`}
+                        className="p-1 rounded text-gray-400 hover:text-gray-700 hover:bg-gray-100 shrink-0"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                      </button>
                     </div>
                   )}
                   {contact.phoneNumber && (
@@ -388,15 +445,60 @@ export default function CountyDetail() {
                       </a>
                     </div>
                   )}
+                  {!contact.emailAddress && !contact.phoneNumber && (
+                    <p className="text-xs text-gray-400 italic">No email or phone on file.</p>
+                  )}
                 </div>
 
-                <div className="flex items-center gap-4 mt-3 pt-3 border-t">
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <ConfidenceBadge confidence={contact.confidenceScore} />
+                  {contact.sourceUrl && (
+                    <a
+                      href={contact.sourceUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-xs text-gray-500 hover:text-blue-700"
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                      Source
+                    </a>
+                  )}
+                </div>
+
+                <div className="mt-2 text-xs text-gray-400 space-y-0.5">
+                  <p>Added {formatDateTime(contact.createdAt)}</p>
+                  {contact.verifiedAt ? (
+                    <p className="text-green-600 flex items-center gap-1">
+                      <ShieldCheck className="w-3 h-3" />
+                      Verified {formatDateTime(contact.verifiedAt)}
+                    </p>
+                  ) : (
+                    <button
+                      onClick={() => markVerified.mutate(contact.id)}
+                      disabled={markVerified.isPending}
+                      className="inline-flex items-center gap-1 text-gray-400 hover:text-green-700 disabled:opacity-50"
+                    >
+                      <ShieldCheck className="w-3 h-3" />
+                      Mark verified
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-4 mt-3 pt-3 border-t flex-wrap">
                   <button
                     onClick={() => setEditingContact(contact)}
                     className="inline-flex items-center gap-1 text-sm text-gray-600 hover:text-gray-900"
                   >
                     <Pencil className="w-3.5 h-3.5" />
                     Edit
+                  </button>
+                  <button
+                    onClick={() => verifyContact.mutate(contact.id)}
+                    disabled={verifyContact.isPending}
+                    className="inline-flex items-center gap-1 text-sm text-blue-600 hover:text-blue-800 disabled:opacity-50"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    Verify with AI
                   </button>
                   <button
                     onClick={() => setDeletingContact(contact)}
@@ -473,6 +575,25 @@ export default function CountyDetail() {
 
       {editingContact && (
         <Modal title={`Edit ${editingContact.fullName}`} onClose={() => setEditingContact(null)}>
+          <div className="mb-4 pb-4 border-b space-y-2">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="text-xs text-gray-500 space-y-0.5">
+                <p>Added {formatDateTime(editingContact.createdAt)}</p>
+                <p className="capitalize">Source: {editingContact.researchSource?.replace(/_/g, ' ') ?? 'manual'}</p>
+                {editingContact.verifiedAt && <p>Verified {formatDateTime(editingContact.verifiedAt)}</p>}
+              </div>
+              <ConfidenceBadge confidence={editingContact.confidenceScore} />
+            </div>
+            <button
+              type="button"
+              onClick={() => verifyContact.mutate(editingContact.id)}
+              disabled={verifyContact.isPending}
+              className="inline-flex items-center gap-1.5 text-sm font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-lg disabled:opacity-50"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              {verifyContact.isPending ? 'Starting research...' : 'Verify with AI'}
+            </button>
+          </div>
           <ContactForm
             initialValues={{
               fullName: editingContact.fullName,
@@ -494,7 +615,11 @@ export default function CountyDetail() {
       {deletingContact && (
         <ConfirmDialog
           title="Delete Contact"
-          message={`Are you sure you want to delete ${deletingContact.fullName}? This will also remove any associated list requests.`}
+          message={
+            county.taxOfficials.length === 1
+              ? `${deletingContact.fullName} is the only contact for this county. Deleting them will leave this county with no contacts and remove any associated list requests. Are you sure?`
+              : `Are you sure you want to delete ${deletingContact.fullName}? This will also remove any associated list requests.`
+          }
           confirmLabel="Delete"
           busy={deleteContact.isPending}
           onConfirm={() => deleteContact.mutate(deletingContact.id)}

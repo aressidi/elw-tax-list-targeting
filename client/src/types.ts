@@ -106,9 +106,26 @@ export interface TaxOfficial {
   researchSource: string | null;
   confidenceScore: ConfidenceLevel | null;
   sourceUrl: string | null;
+  verifiedAt: string | null;
   notes: string | null;
   createdAt: string;
   listRequests?: ListRequest[];
+}
+
+// ====================
+// Global Contacts View (card 05)
+// ====================
+
+export interface ContactListItem extends Omit<TaxOfficial, 'listRequests'> {
+  county: {
+    id: number;
+    name: string;
+    stateId: number;
+    state: {
+      abbreviation: string;
+      name: string;
+    };
+  };
 }
 
 export interface CountyDetail {

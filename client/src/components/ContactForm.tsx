@@ -44,6 +44,10 @@ export default function ContactForm({
       setError('Full name is required.');
       return;
     }
+    if (!values.emailAddress.trim() && !values.phoneNumber.trim()) {
+      setError('Provide an email address or phone number.');
+      return;
+    }
     setError(null);
     onSubmit(values);
   };

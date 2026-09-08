@@ -7,6 +7,7 @@ import States from './pages/States';
 import StateDetail from './pages/StateDetail';
 import Counties from './pages/Counties';
 import CountyDetail from './pages/CountyDetail';
+import Contacts from './pages/Contacts';
 import TaxOfficials from './pages/TaxOfficials';
 import ListRequests from './pages/ListRequests';
 import FoiaTemplates from './pages/FoiaTemplates';
@@ -30,6 +31,7 @@ function App() {
             <Route path="/counties" component={Counties} />
             <Route path="/counties/new-with-research" component={NewCountyWithResearch} />
             <Route path="/counties/:id" component={CountyDetail} />
+            <Route path="/contacts" component={Contacts} />
             <Route path="/tax-officials" component={TaxOfficials} />
             <Route path="/list-requests" component={ListRequests} />
             <Route path="/foia-templates" component={FoiaTemplates} />

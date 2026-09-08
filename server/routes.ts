@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { eq, and, like, desc, asc, sql, count, isNull, not, or, gte, lte, inArray } from 'drizzle-orm';
+import { eq, and, like, ilike, desc, asc, sql, count, isNull, not, or, gte, lte, inArray } from 'drizzle-orm';
 import { db } from './db.js';
 import {
   states,
@@ -88,6 +88,39 @@ function isUniqueViolation(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false;
   const err = error as { code?: string; cause?: { code?: string } };
   return err.code === '23505' || err.cause?.code === '23505';
+}
+
+function isValidEmail(value: string): boolean {
+  return EMAIL_REGEX.test(value);
+}
+
+function hasContactMethod(email: string | null | undefined, phone: string | null | undefined): boolean {
+  return Boolean(email) || Boolean(phone);
+}
+
+// Duplicate detection for manual contact creation/updates: same name or same
+// email within a county is rejected rather than silently creating a second
+// record for the same person.
+async function findDuplicateContact(
+  countyId: number,
+  fullName: string,
+  emailAddress: string | null,
+  excludeId?: number
+): Promise<string | null> {
+  const existing = await db.query.taxOfficials.findMany({ where: eq(taxOfficials.countyId, countyId) });
+  const nameKey = fullName.trim().toLowerCase();
+  const emailKey = emailAddress ? emailAddress.trim().toLowerCase() : null;
+
+  for (const o of existing) {
+    if (excludeId !== undefined && o.id === excludeId) continue;
+    if (o.fullName.trim().toLowerCase() === nameKey) {
+      return `A contact named "${fullName}" already exists for this county`;
+    }
+    if (emailKey && o.emailAddress && o.emailAddress.trim().toLowerCase() === emailKey) {
+      return `A contact with email "${emailAddress}" already exists for this county`;
+    }
+  }
+  return null;
 }
 
 // ============================================================
@@ -328,7 +361,7 @@ router.get('/counties/:id', async (req, res) => {
       with: {
         state: true,
         taxOfficials: {
-          orderBy: desc(taxOfficials.isPrimary),
+          orderBy: [desc(taxOfficials.isPrimary), asc(taxOfficials.fullName)],
           with: {
             listRequests: {
               orderBy: desc(listRequests.createdAt),
@@ -896,10 +929,15 @@ router.post('/research/bulk', async (req, res) => {
 });
 
 // ============================================================
-// Tax Officials Routes
+// Contacts / Tax Officials Routes
+//
+// "/api/contacts" is the card-05 surface: global search/filter/sort across
+// counties, plus primary/verify actions. "/api/tax-officials" is preserved
+// for backward compatibility (card 03) and delegates to the same handlers
+// so both surfaces share validation and the single-primary invariant.
 // ============================================================
 
-// GET /api/tax-officials - List all officials with filters
+// GET /api/tax-officials - List all officials with filters (legacy surface)
 router.get('/tax-officials', async (req, res) => {
   try {
     const { limit, offset, page } = getPagination(req);
@@ -944,10 +982,149 @@ router.get('/tax-officials', async (req, res) => {
   }
 });
 
-// POST /api/tax-officials - Create new tax official (contact)
-router.post('/tax-officials', async (req, res) => {
+// GET /api/contacts - Global contact search/list: search across name/email/
+// county, filter by state or county, sort by county or name, paginated.
+router.get('/contacts', async (req, res) => {
   try {
-    const { countyId, fullName, title, phoneNumber, emailAddress, officeAddress, websiteUrl, notes, isPrimary } = req.body;
+    const { limit, offset, page } = getPagination(req);
+    const { search, state: stateAbbreviation, countyId, hasEmail, sort } = req.query;
+
+    let conditions = [];
+    if (countyId) {
+      const parsedCountyId = parseInt(countyId as string);
+      if (isNaN(parsedCountyId)) {
+        return res.status(400).json(errorResponse('Invalid countyId filter', 400));
+      }
+      conditions.push(eq(taxOfficials.countyId, parsedCountyId));
+    }
+    if (stateAbbreviation) {
+      conditions.push(eq(states.abbreviation, (stateAbbreviation as string).toUpperCase()));
+    }
+    if (hasEmail === 'true') conditions.push(not(isNull(taxOfficials.emailAddress)));
+    if (hasEmail === 'false') conditions.push(isNull(taxOfficials.emailAddress));
+    if (search) {
+      const term = `%${search}%`;
+      conditions.push(
+        or(
+          ilike(taxOfficials.fullName, term),
+          ilike(taxOfficials.emailAddress, term),
+          ilike(counties.name, term)
+        )
+      );
+    }
+
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
+    const totalResult = await db
+      .select({ count: count() })
+      .from(taxOfficials)
+      .innerJoin(counties, eq(taxOfficials.countyId, counties.id))
+      .innerJoin(states, eq(counties.stateId, states.id))
+      .where(whereClause);
+    const total = totalResult[0]?.count || 0;
+
+    const orderByClauses =
+      sort === 'name' ? [asc(taxOfficials.fullName)] : [asc(counties.name), asc(taxOfficials.fullName)];
+
+    const rows = await db
+      .select({
+        id: taxOfficials.id,
+        countyId: taxOfficials.countyId,
+        fullName: taxOfficials.fullName,
+        title: taxOfficials.title,
+        phoneNumber: taxOfficials.phoneNumber,
+        emailAddress: taxOfficials.emailAddress,
+        officeAddress: taxOfficials.officeAddress,
+        websiteUrl: taxOfficials.websiteUrl,
+        isPrimary: taxOfficials.isPrimary,
+        researchSource: taxOfficials.researchSource,
+        confidenceScore: taxOfficials.confidenceScore,
+        sourceUrl: taxOfficials.sourceUrl,
+        verifiedAt: taxOfficials.verifiedAt,
+        notes: taxOfficials.notes,
+        createdAt: taxOfficials.createdAt,
+        countyName: counties.name,
+        stateId: counties.stateId,
+        stateAbbreviation: states.abbreviation,
+        stateName: states.name,
+      })
+      .from(taxOfficials)
+      .innerJoin(counties, eq(taxOfficials.countyId, counties.id))
+      .innerJoin(states, eq(counties.stateId, states.id))
+      .where(whereClause)
+      .orderBy(...orderByClauses)
+      .limit(limit)
+      .offset(offset);
+
+    const data = rows.map((r) => ({
+      id: r.id,
+      countyId: r.countyId,
+      fullName: r.fullName,
+      title: r.title,
+      phoneNumber: r.phoneNumber,
+      emailAddress: r.emailAddress,
+      officeAddress: r.officeAddress,
+      websiteUrl: r.websiteUrl,
+      isPrimary: r.isPrimary,
+      researchSource: r.researchSource,
+      confidenceScore: r.confidenceScore,
+      sourceUrl: r.sourceUrl,
+      verifiedAt: r.verifiedAt,
+      notes: r.notes,
+      createdAt: r.createdAt,
+      county: {
+        id: r.countyId,
+        name: r.countyName,
+        stateId: r.stateId,
+        state: { abbreviation: r.stateAbbreviation, name: r.stateName },
+      },
+    }));
+
+    res.json(successResponse(data, {
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      },
+    }));
+  } catch (error) {
+    console.error('Error fetching contacts:', error);
+    res.status(500).json(errorResponse('Failed to fetch contacts'));
+  }
+});
+
+// GET /api/counties/:id/contacts - Contacts for a single county, primary first then name
+router.get('/counties/:id/contacts', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) {
+      return res.status(400).json(errorResponse('Invalid county ID', 400));
+    }
+
+    const county = await db.query.counties.findFirst({ where: eq(counties.id, id) });
+    if (!county) {
+      return res.status(404).json(errorResponse('County not found', 404));
+    }
+
+    const results = await db.query.taxOfficials.findMany({
+      where: eq(taxOfficials.countyId, id),
+      orderBy: [desc(taxOfficials.isPrimary), asc(taxOfficials.fullName)],
+    });
+
+    res.json(successResponse(results));
+  } catch (error) {
+    console.error('Error fetching county contacts:', error);
+    res.status(500).json(errorResponse('Failed to fetch county contacts'));
+  }
+});
+
+// POST /api/tax-officials, POST /api/contacts - Create a new contact.
+// Requires a name and at least one contact method (email or phone), and
+// rejects a duplicate name/email within the same county.
+async function createContactHandler(req: any, res: any) {
+  try {
+    const { countyId, fullName, title, phoneNumber, emailAddress, officeAddress, websiteUrl, notes, isPrimary } = req.body ?? {};
 
     const parsedCountyId = parseInt(countyId);
     if (!countyId || isNaN(parsedCountyId)) {
@@ -959,9 +1136,29 @@ router.post('/tax-officials', async (req, res) => {
       return res.status(400).json(errorResponse('fullName is required', 400));
     }
 
+    const cleanEmail = cleanString(emailAddress);
+    if (cleanEmail && !isValidEmail(cleanEmail)) {
+      return res.status(400).json(errorResponse('emailAddress is not a valid email', 400));
+    }
+
+    const cleanPhone = cleanString(phoneNumber);
+    if (!hasContactMethod(cleanEmail, cleanPhone)) {
+      return res.status(400).json(errorResponse('Provide an email address or phone number', 400));
+    }
+
+    const cleanWebsite = cleanString(websiteUrl);
+    if (cleanWebsite && !isValidUrl(cleanWebsite)) {
+      return res.status(400).json(errorResponse('websiteUrl is not a valid URL', 400));
+    }
+
     const county = await db.query.counties.findFirst({ where: eq(counties.id, parsedCountyId) });
     if (!county) {
       return res.status(400).json(errorResponse('County not found', 400));
+    }
+
+    const duplicate = await findDuplicateContact(parsedCountyId, cleanName, cleanEmail);
+    if (duplicate) {
+      return res.status(409).json(errorResponse(duplicate, 409));
     }
 
     const shouldBePrimary = isPrimary === true;
@@ -969,10 +1166,10 @@ router.post('/tax-officials', async (req, res) => {
       countyId: parsedCountyId,
       fullName: cleanName,
       title: cleanString(title),
-      phoneNumber: cleanString(phoneNumber),
-      emailAddress: cleanString(emailAddress),
+      phoneNumber: cleanPhone,
+      emailAddress: cleanEmail,
       officeAddress: cleanString(officeAddress),
-      websiteUrl: cleanString(websiteUrl),
+      websiteUrl: cleanWebsite,
       notes: cleanString(notes),
       isPrimary: shouldBePrimary,
     };
@@ -986,21 +1183,35 @@ router.post('/tax-officials', async (req, res) => {
 
     res.status(201).json(successResponse(result[0]));
   } catch (error) {
-    console.error('Error creating tax official:', error);
-    res.status(500).json(errorResponse('Failed to create tax official'));
+    if (isUniqueViolation(error)) {
+      return res.status(409).json(errorResponse('Duplicate contact detected', 409));
+    }
+    console.error('Error creating contact:', error);
+    res.status(500).json(errorResponse('Failed to create contact'));
   }
-});
+}
 
-// PATCH /api/tax-officials/:id - Update a contact's details (isPrimary changes
-// must go through the dedicated /primary endpoint to preserve the single-primary invariant)
-router.patch('/tax-officials/:id', async (req, res) => {
+router.post('/tax-officials', createContactHandler);
+router.post('/contacts', createContactHandler);
+
+// PATCH /api/tax-officials/:id, PATCH /api/contacts/:id - Update a contact's
+// details. isPrimary changes must go through the dedicated /primary endpoint
+// to preserve the single-primary invariant. `markVerified: true` stamps
+// verifiedAt without touching any other field (an explicit human action,
+// never an automatic overwrite).
+async function updateContactHandler(req: any, res: any) {
   try {
     const id = parseInt(req.params.id);
     if (isNaN(id)) {
-      return res.status(400).json(errorResponse('Invalid tax official ID', 400));
+      return res.status(400).json(errorResponse('Invalid contact ID', 400));
     }
 
-    const { fullName, title, phoneNumber, emailAddress, officeAddress, websiteUrl, notes } = req.body;
+    const existing = await db.query.taxOfficials.findFirst({ where: eq(taxOfficials.id, id) });
+    if (!existing) {
+      return res.status(404).json(errorResponse('Contact not found', 404));
+    }
+
+    const { fullName, title, phoneNumber, emailAddress, officeAddress, websiteUrl, notes, markVerified } = req.body ?? {};
     const updateData: Record<string, unknown> = {};
 
     if (fullName !== undefined) {
@@ -1012,42 +1223,70 @@ router.patch('/tax-officials/:id', async (req, res) => {
     }
     if (title !== undefined) updateData.title = cleanString(title);
     if (phoneNumber !== undefined) updateData.phoneNumber = cleanString(phoneNumber);
-    if (emailAddress !== undefined) updateData.emailAddress = cleanString(emailAddress);
+    if (emailAddress !== undefined) {
+      const cleanEmail = cleanString(emailAddress);
+      if (cleanEmail && !isValidEmail(cleanEmail)) {
+        return res.status(400).json(errorResponse('emailAddress is not a valid email', 400));
+      }
+      updateData.emailAddress = cleanEmail;
+    }
     if (officeAddress !== undefined) updateData.officeAddress = cleanString(officeAddress);
-    if (websiteUrl !== undefined) updateData.websiteUrl = cleanString(websiteUrl);
+    if (websiteUrl !== undefined) {
+      const cleanWebsite = cleanString(websiteUrl);
+      if (cleanWebsite && !isValidUrl(cleanWebsite)) {
+        return res.status(400).json(errorResponse('websiteUrl is not a valid URL', 400));
+      }
+      updateData.websiteUrl = cleanWebsite;
+    }
     if (notes !== undefined) updateData.notes = cleanString(notes);
+    if (markVerified === true) updateData.verifiedAt = new Date();
 
     if (Object.keys(updateData).length === 0) {
       return res.status(400).json(errorResponse('No valid fields to update', 400));
     }
 
-    const result = await db.update(taxOfficials).set(updateData).where(eq(taxOfficials.id, id)).returning();
-
-    if (result.length === 0) {
-      return res.status(404).json(errorResponse('Tax official not found', 404));
+    const finalEmail = 'emailAddress' in updateData ? (updateData.emailAddress as string | null) : existing.emailAddress;
+    const finalPhone = 'phoneNumber' in updateData ? (updateData.phoneNumber as string | null) : existing.phoneNumber;
+    if (!hasContactMethod(finalEmail, finalPhone)) {
+      return res.status(400).json(errorResponse('Contact must have an email address or phone number', 400));
     }
+
+    const finalName = (updateData.fullName as string | undefined) ?? existing.fullName;
+    const duplicate = await findDuplicateContact(existing.countyId, finalName, finalEmail, id);
+    if (duplicate) {
+      return res.status(409).json(errorResponse(duplicate, 409));
+    }
+
+    const result = await db.update(taxOfficials).set(updateData).where(eq(taxOfficials.id, id)).returning();
 
     res.json(successResponse(result[0]));
   } catch (error) {
-    console.error('Error updating tax official:', error);
-    res.status(500).json(errorResponse('Failed to update tax official'));
+    if (isUniqueViolation(error)) {
+      return res.status(409).json(errorResponse('Duplicate contact detected', 409));
+    }
+    console.error('Error updating contact:', error);
+    res.status(500).json(errorResponse('Failed to update contact'));
   }
-});
+}
 
-// PATCH /api/tax-officials/:id/primary - Set or unset the primary contact for a county.
-// Setting primary unsets any other primary contact in the same county within one transaction.
-router.patch('/tax-officials/:id/primary', async (req, res) => {
+router.patch('/tax-officials/:id', updateContactHandler);
+router.patch('/contacts/:id', updateContactHandler);
+
+// PATCH/POST /api/contacts/:id/primary (and legacy PATCH /api/tax-officials/:id/primary) -
+// Set or unset the primary contact for a county. Setting primary unsets any
+// other primary contact in the same county within one transaction.
+async function setPrimaryHandler(req: any, res: any) {
   try {
     const id = parseInt(req.params.id);
     if (isNaN(id)) {
-      return res.status(400).json(errorResponse('Invalid tax official ID', 400));
+      return res.status(400).json(errorResponse('Invalid contact ID', 400));
     }
 
     const makePrimary = req.body?.isPrimary !== false;
 
     const existing = await db.query.taxOfficials.findFirst({ where: eq(taxOfficials.id, id) });
     if (!existing) {
-      return res.status(404).json(errorResponse('Tax official not found', 404));
+      return res.status(404).json(errorResponse('Contact not found', 404));
     }
 
     let result;
@@ -1065,28 +1304,97 @@ router.patch('/tax-officials/:id/primary', async (req, res) => {
     console.error('Error updating primary contact:', error);
     res.status(500).json(errorResponse('Failed to update primary contact'));
   }
-});
+}
 
-// DELETE /api/tax-officials/:id - Delete a contact (cascades to their list requests)
-router.delete('/tax-officials/:id', async (req, res) => {
+router.patch('/tax-officials/:id/primary', setPrimaryHandler);
+router.patch('/contacts/:id/primary', setPrimaryHandler);
+router.post('/contacts/:id/primary', setPrimaryHandler);
+
+// POST /api/contacts/:id/verify - Re-research a contact's county via the
+// card-04 provider pipeline. This never writes to tax_officials directly:
+// results still land in county_research_runs and must go through the
+// explicit ai-import review flow, exactly like the county-level research
+// action. Returns 503 when no provider is configured (no fake verification).
+router.post('/contacts/:id/verify', async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     if (isNaN(id)) {
-      return res.status(400).json(errorResponse('Invalid tax official ID', 400));
+      return res.status(400).json(errorResponse('Invalid contact ID', 400));
+    }
+
+    const contact = await db.query.taxOfficials.findFirst({ where: eq(taxOfficials.id, id) });
+    if (!contact) {
+      return res.status(404).json(errorResponse('Contact not found', 404));
+    }
+
+    const { provider, force } = req.body ?? {};
+    if (provider !== undefined && provider !== null && provider !== 'mock' && provider !== 'http') {
+      return res.status(400).json(errorResponse('provider must be "mock" or "http"', 400));
+    }
+
+    const result = await triggerCountyResearch(contact.countyId, {
+      requestedProvider: provider ?? null,
+      force: force === true,
+    });
+
+    switch (result.kind) {
+      case 'not_found':
+        return res.status(404).json(errorResponse('County not found for this contact', 404));
+      case 'conflict':
+        return res.status(409).json(errorResponse(result.message, 409));
+      case 'rate_limited':
+        return res.status(429).json(errorResponse(result.message, 429));
+      case 'cached':
+        return res.json(
+          successResponse({ contactId: id, countyId: contact.countyId, run: result.run }, { cached: true })
+        );
+      case 'failed':
+        if (result.providerUnavailable) {
+          return res
+            .status(503)
+            .json(
+              errorResponse(
+                result.error || 'No research provider configured. Verify this contact manually or configure RESEARCH_PROVIDER.',
+                503
+              )
+            );
+        }
+        return res.json(successResponse({ contactId: id, countyId: contact.countyId, run: result.run }));
+      case 'completed':
+        return res.status(201).json(successResponse({ contactId: id, countyId: contact.countyId, run: result.run }));
+      default:
+        return res.status(500).json(errorResponse('Unexpected verification result'));
+    }
+  } catch (error) {
+    console.error('Error verifying contact:', error);
+    res.status(500).json(errorResponse('Failed to verify contact'));
+  }
+});
+
+// DELETE /api/tax-officials/:id, DELETE /api/contacts/:id - Delete a contact
+// (cascades to their list requests)
+async function deleteContactHandler(req: any, res: any) {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) {
+      return res.status(400).json(errorResponse('Invalid contact ID', 400));
     }
 
     const result = await db.delete(taxOfficials).where(eq(taxOfficials.id, id)).returning();
 
     if (result.length === 0) {
-      return res.status(404).json(errorResponse('Tax official not found', 404));
+      return res.status(404).json(errorResponse('Contact not found', 404));
     }
 
     res.json(successResponse({ id, deleted: true }));
   } catch (error) {
-    console.error('Error deleting tax official:', error);
-    res.status(500).json(errorResponse('Failed to delete tax official'));
+    console.error('Error deleting contact:', error);
+    res.status(500).json(errorResponse('Failed to delete contact'));
   }
-});
+}
+
+router.delete('/tax-officials/:id', deleteContactHandler);
+router.delete('/contacts/:id', deleteContactHandler);
 
 // ============================================================
 // FOIA Templates Routes
