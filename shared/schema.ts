@@ -1,4 +1,4 @@
-import { pgTable, serial, varchar, text, integer, decimal, timestamp, boolean, pgEnum, index, uniqueIndex, foreignKey, primaryKey } from 'drizzle-orm/pg-core';
+import { pgTable, serial, varchar, text, integer, decimal, timestamp, boolean, jsonb, pgEnum, index, uniqueIndex, foreignKey, primaryKey } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
 import { createInsertSchema } from 'drizzle-zod';
 import { z } from 'zod';
@@ -32,6 +32,48 @@ export const researchSourceEnum = pgEnum('research_source', ['ai_search', 'websi
 export const emailTypeEnum = pgEnum('email_type', ['sent', 'received', 'follow_up']);
 
 export const fileTypeEnum = pgEnum('file_type', ['csv', 'pdf', 'excel', 'txt', 'other']);
+
+export const priceBasisEnum = pgEnum('price_basis', [
+  'flat_list',
+  'per_listing',
+  'per_page',
+  'per_record',
+  'hourly',
+  'unknown'
+]);
+
+export const quantityUnitEnum = pgEnum('quantity_unit', [
+  'pages',
+  'listings',
+  'records',
+  'counties',
+  'unknown'
+]);
+
+export const listRequestEventTypeEnum = pgEnum('list_request_event_type', [
+  'note',
+  'email_sent',
+  'email_received',
+  'phone_call',
+  'form_submitted',
+  'mail_sent',
+  'response_received',
+  'payment_requested',
+  'payment_made',
+  'file_received',
+  'data_processed',
+  'status_changed',
+  'other'
+]);
+
+export const eventChannelEnum = pgEnum('event_channel', [
+  'email',
+  'phone',
+  'mail',
+  'web_form',
+  'in_person',
+  'other'
+]);
 
 // ====================
 // States Table
@@ -119,6 +161,12 @@ export const listRequests = pgTable('list_requests', {
   costAmount: decimal('cost_amount', { precision: 10, scale: 2 }),
   costCurrency: varchar('cost_currency', { length: 3 }).default('USD'),
   costNotes: text('cost_notes'),
+  pricingBasis: priceBasisEnum('pricing_basis'),
+  costQuantity: decimal('cost_quantity', { precision: 10, scale: 2 }),
+  costQuantityUnit: quantityUnitEnum('cost_quantity_unit'),
+  sourceLabel: text('source_label'),
+  rawListStatus: text('raw_list_status'),
+  latestEventAt: timestamp('latest_event_at', { withTimezone: true }),
   paymentStatus: paymentStatusEnum('payment_status').default('not_required'),
   foiaTemplateId: integer('foia_template_id').references(() => foiaTemplates.id, { onDelete: 'set null' }),
   emailSentAt: timestamp('email_sent_at', { withTimezone: true }),
@@ -188,6 +236,66 @@ export const processedLists = pgTable('processed_lists', {
 }));
 
 // ====================
+// List Request Prices Table
+// ====================
+export const listRequestPrices = pgTable('list_request_prices', {
+  id: serial('id').primaryKey(),
+  listRequestId: integer('list_request_id').notNull().references(() => listRequests.id, { onDelete: 'cascade' }),
+  basis: priceBasisEnum('basis').default('unknown'),
+  unitAmount: decimal('unit_amount', { precision: 10, scale: 2 }),
+  quantity: decimal('quantity', { precision: 10, scale: 2 }),
+  quantityUnit: quantityUnitEnum('quantity_unit'),
+  currency: varchar('currency', { length: 3 }).default('USD'),
+  totalAmount: decimal('total_amount', { precision: 10, scale: 2 }),
+  effectiveDate: timestamp('effective_date', { withTimezone: true }),
+  rawText: text('raw_text'),
+  sourceLabel: varchar('source_label', { length: 500 }),
+  notes: text('notes'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  requestIdx: index('list_request_prices_request_idx').on(table.listRequestId),
+  effectiveDateIdx: index('list_request_prices_effective_date_idx').on(table.effectiveDate),
+  basisIdx: index('list_request_prices_basis_idx').on(table.basis),
+}));
+
+// ====================
+// List Request Events Table
+// ====================
+export const listRequestEvents = pgTable('list_request_events', {
+  id: serial('id').primaryKey(),
+  listRequestId: integer('list_request_id').notNull().references(() => listRequests.id, { onDelete: 'cascade' }),
+  eventType: listRequestEventTypeEnum('event_type').notNull(),
+  occurredAt: timestamp('occurred_at', { withTimezone: true }).defaultNow(),
+  channel: eventChannelEnum('channel'),
+  summary: varchar('summary', { length: 500 }),
+  body: text('body'),
+  metadata: jsonb('metadata'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  requestIdx: index('list_request_events_request_idx').on(table.listRequestId),
+  occurredAtIdx: index('list_request_events_occurred_at_idx').on(table.occurredAt),
+  eventTypeIdx: index('list_request_events_event_type_idx').on(table.eventType),
+}));
+
+// ====================
+// List Request Status History Table
+// ====================
+export const listRequestStatusHistory = pgTable('list_request_status_history', {
+  id: serial('id').primaryKey(),
+  listRequestId: integer('list_request_id').notNull().references(() => listRequests.id, { onDelete: 'cascade' }),
+  fromStatus: requestStatusEnum('from_status'),
+  toStatus: requestStatusEnum('to_status').notNull(),
+  changedAt: timestamp('changed_at', { withTimezone: true }).defaultNow().notNull(),
+  reason: text('reason'),
+  sourceLabel: text('source_label'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  requestIdx: index('list_request_status_history_request_idx').on(table.listRequestId),
+  changedAtIdx: index('list_request_status_history_changed_at_idx').on(table.changedAt),
+  toStatusIdx: index('list_request_status_history_to_status_idx').on(table.toStatus),
+}));
+
+// ====================
 // Relations
 // ====================
 
@@ -226,6 +334,9 @@ export const listRequestsRelations = relations(listRequests, ({ one, many }) => 
   }),
   emailTracking: many(emailTracking),
   processedLists: many(processedLists),
+  prices: many(listRequestPrices),
+  events: many(listRequestEvents),
+  statusHistory: many(listRequestStatusHistory),
 }));
 
 export const emailTrackingRelations = relations(emailTracking, ({ one }) => ({
@@ -242,6 +353,27 @@ export const processedListsRelations = relations(processedLists, ({ one }) => ({
   }),
 }));
 
+export const listRequestPricesRelations = relations(listRequestPrices, ({ one }) => ({
+  listRequest: one(listRequests, {
+    fields: [listRequestPrices.listRequestId],
+    references: [listRequests.id],
+  }),
+}));
+
+export const listRequestEventsRelations = relations(listRequestEvents, ({ one }) => ({
+  listRequest: one(listRequests, {
+    fields: [listRequestEvents.listRequestId],
+    references: [listRequests.id],
+  }),
+}));
+
+export const listRequestStatusHistoryRelations = relations(listRequestStatusHistory, ({ one }) => ({
+  listRequest: one(listRequests, {
+    fields: [listRequestStatusHistory.listRequestId],
+    references: [listRequests.id],
+  }),
+}));
+
 // ====================
 // Zod Insert Schemas
 // ====================
@@ -253,6 +385,9 @@ export const insertFoiaTemplateSchema = createInsertSchema(foiaTemplates);
 export const insertListRequestSchema = createInsertSchema(listRequests);
 export const insertEmailTrackingSchema = createInsertSchema(emailTracking);
 export const insertProcessedListSchema = createInsertSchema(processedLists);
+export const insertListRequestPriceSchema = createInsertSchema(listRequestPrices);
+export const insertListRequestEventSchema = createInsertSchema(listRequestEvents);
+export const insertListRequestStatusHistorySchema = createInsertSchema(listRequestStatusHistory);
 
 // ====================
 // Type Exports
@@ -278,6 +413,15 @@ export type NewEmailTracking = typeof emailTracking.$inferInsert;
 
 export type ProcessedList = typeof processedLists.$inferSelect;
 export type NewProcessedList = typeof processedLists.$inferInsert;
+
+export type ListRequestPrice = typeof listRequestPrices.$inferSelect;
+export type NewListRequestPrice = typeof listRequestPrices.$inferInsert;
+
+export type ListRequestEvent = typeof listRequestEvents.$inferSelect;
+export type NewListRequestEvent = typeof listRequestEvents.$inferInsert;
+
+export type ListRequestStatusHistory = typeof listRequestStatusHistory.$inferSelect;
+export type NewListRequestStatusHistory = typeof listRequestStatusHistory.$inferInsert;
 
 // ====================
 // Seed Data - 50 US States with FIPS codes
