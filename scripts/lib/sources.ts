@@ -2,26 +2,60 @@ import { readFile } from 'node:fs/promises';
 import { parseCsv } from './csv-parser.js';
 
 /**
- * A single raw row from the source spreadsheet, mapped positionally to
- * columns A-L as documented in cards/02-import-existing-data.md.
- * All values are raw strings (trimmed of surrounding whitespace only) —
- * cleaning/parsing happens later in parse-row.ts.
+ * Which raw column layout a row came from. "legacy" is the original
+ * positional A-L contract from card 02 (status,state,full_name,county,
+ * phone_number,email_address,county_alt,title,contact_status,list_status,
+ * notes,response). "human" is the real desktop CSV export's header/shape
+ * (card 02B), which has separate Cost/Cost Type columns and a clean
+ * List Status label instead of legacy's free-text status+cost column.
+ */
+export type RawImportFormat = 'legacy' | 'human';
+
+/**
+ * A single raw row from a source spreadsheet/CSV. All values are raw
+ * strings (trimmed of surrounding whitespace only) — cleaning/parsing
+ * happens later in parse-row.ts. Fields that only apply to one format are
+ * optional; parse-row.ts branches on `format`.
  */
 export interface RawImportRow {
   /** 1-based row number in the source, for error/warning reporting. */
   rowNumber: number;
-  status: string; // A
-  state: string; // B
-  fullName: string; // C
-  county: string; // D
-  phoneNumber: string; // E
-  emailAddress: string; // F
-  countyAlt: string; // G (county appears twice in the source sheet)
-  title: string; // H
-  contactStatus: string; // I
-  listStatus: string; // J
-  notes: string; // K
-  response: string; // L
+  format: RawImportFormat;
+
+  state: string;
+  fullName: string;
+  /** Explicit county column, when present. */
+  county: string;
+  /**
+   * Fallback/office label used only for county-name cleaning when `county`
+   * is blank — legacy's duplicated "county_alt" column, or the human CSV's
+   * "County Treasurer Website" column (which despite its name usually
+   * holds an office label like "Pennington County Treasurer" or a bare
+   * county name, not a URL).
+   */
+  countyOfficeLabel: string;
+  phoneNumber: string;
+  /** May be a real email OR (human format) a web-form URL — see parse-row.ts. */
+  emailAddress: string;
+  title: string;
+  contactStatus: string;
+  /**
+   * legacy: free text combining status + cost, e.g. "$75 flat for list".
+   * human: a clean status label, e.g. "Requires Payment", "List Provided!".
+   */
+  listStatus: string;
+  notes: string;
+  response: string;
+
+  /** legacy only — column A: "M"/"m"/"Needs data extraction"/empty. */
+  legacyStatus?: string;
+  /** human only — raw currency amount, e.g. "$75", "$0.50". */
+  cost?: string;
+  /** human only — raw pricing basis label, e.g. "List", "Page", "Listing". */
+  costType?: string;
+
+  /** Source-level warnings (e.g. non-empty data in an unnamed trailing column). */
+  warnings?: string[];
 }
 
 /**
@@ -35,7 +69,7 @@ export interface ImportSource {
   fetchRows(): Promise<RawImportRow[]>;
 }
 
-const EXPECTED_HEADERS = [
+const LEGACY_HEADERS = [
   'status',
   'state',
   'full_name',
@@ -50,17 +84,35 @@ const EXPECTED_HEADERS = [
   'response',
 ];
 
-function rowFromColumns(rowNumber: number, cols: string[]): RawImportRow {
+/** Header names (normalized: trimmed + lowercased) for the real desktop CSV export. */
+const HUMAN_HEADER_FIELD_MAP: Record<string, keyof RawImportRow> = {
+  'state': 'state',
+  'full name': 'fullName',
+  'county treasurer website': 'countyOfficeLabel',
+  'phone number': 'phoneNumber',
+  'email address': 'emailAddress',
+  'county': 'county',
+  'title': 'title',
+  'contact status': 'contactStatus',
+  'list status': 'listStatus',
+  'cost': 'cost',
+  'cost type': 'costType',
+  'notes': 'notes',
+  'response': 'response',
+};
+
+function legacyRowFromColumns(rowNumber: number, cols: string[]): RawImportRow {
   const get = (i: number) => (cols[i] ?? '').trim();
   return {
     rowNumber,
-    status: get(0),
+    format: 'legacy',
+    legacyStatus: get(0),
     state: get(1),
     fullName: get(2),
     county: get(3),
     phoneNumber: get(4),
     emailAddress: get(5),
-    countyAlt: get(6),
+    countyOfficeLabel: get(6),
     title: get(7),
     contactStatus: get(8),
     listStatus: get(9),
@@ -70,10 +122,73 @@ function rowFromColumns(rowNumber: number, cols: string[]): RawImportRow {
 }
 
 /**
- * Reads rows from a local CSV file. The file must have a header row
- * matching EXPECTED_HEADERS (column order mirrors sheet columns A-L).
- * This is the safe, offline path used when Google Sheets credentials
- * are not available — see scripts/README.md.
+ * Builds a name -> column-index map for the human header, then reads each
+ * data row via that map (order-independent, unlike the legacy positional
+ * contract). Any header column not in HUMAN_HEADER_FIELD_MAP (typically
+ * blank trailing columns from a spreadsheet export) is tracked so that
+ * non-empty data in it can be reported as a warning rather than silently
+ * dropped or mistyped.
+ */
+function buildHumanRowReader(normalizedHeader: string[]): (rowNumber: number, cols: string[]) => RawImportRow {
+  const indexByField = new Map<keyof RawImportRow, number>();
+  const recognizedIndexes = new Set<number>();
+  normalizedHeader.forEach((h, idx) => {
+    const field = HUMAN_HEADER_FIELD_MAP[h];
+    if (field) {
+      indexByField.set(field, idx);
+      recognizedIndexes.add(idx);
+    }
+  });
+
+  const unnamedIndexes = normalizedHeader
+    .map((_, idx) => idx)
+    .filter((idx) => !recognizedIndexes.has(idx));
+
+  return (rowNumber: number, cols: string[]): RawImportRow => {
+    const get = (field: keyof RawImportRow) => {
+      const idx = indexByField.get(field);
+      return idx == null ? '' : (cols[idx] ?? '').trim();
+    };
+
+    const warnings: string[] = [];
+    for (const idx of unnamedIndexes) {
+      const value = (cols[idx] ?? '').trim();
+      if (value !== '') {
+        warnings.push(
+          `Row ${rowNumber} has non-empty data in an unnamed trailing column (position ${idx + 1}): "${value}" — ignored`
+        );
+      }
+    }
+
+    return {
+      rowNumber,
+      format: 'human',
+      state: get('state'),
+      fullName: get('fullName'),
+      county: get('county'),
+      countyOfficeLabel: get('countyOfficeLabel'),
+      phoneNumber: get('phoneNumber'),
+      emailAddress: get('emailAddress'),
+      title: get('title'),
+      contactStatus: get('contactStatus'),
+      listStatus: get('listStatus'),
+      cost: get('cost'),
+      costType: get('costType'),
+      notes: get('notes'),
+      response: get('response'),
+      warnings: warnings.length > 0 ? warnings : undefined,
+    };
+  };
+}
+
+/**
+ * Reads rows from a local CSV file. Accepts either the legacy positional
+ * A-L contract (see scripts/fixtures/county-treasurer-target-list.sample.csv)
+ * or the real desktop export's human-readable header (State, Full Name,
+ * County Treasurer Website, Phone Number, Email Address, County, Title,
+ * Contact Status, List Status, Cost, Cost Type, Notes, Response, plus any
+ * unnamed trailing columns). Detection is by header shape, so no manual
+ * normalized copy is required. See scripts/README.md.
  */
 export class CsvFileSource implements ImportSource {
   constructor(private filePath: string) {}
@@ -99,23 +214,31 @@ export class CsvFileSource implements ImportSource {
 
     const [header, ...dataRows] = table;
     const normalizedHeader = header.map((h) => h.trim().toLowerCase());
-    const headersMatch =
-      normalizedHeader.length === EXPECTED_HEADERS.length &&
-      EXPECTED_HEADERS.every((h, idx) => normalizedHeader[idx] === h);
 
-    if (!headersMatch) {
+    const isLegacy =
+      normalizedHeader.length === LEGACY_HEADERS.length &&
+      LEGACY_HEADERS.every((h, idx) => normalizedHeader[idx] === h);
+    const isHuman = Object.keys(HUMAN_HEADER_FIELD_MAP).every((h) => normalizedHeader.includes(h));
+
+    if (!isLegacy && !isHuman) {
       throw new Error(
         [
-          `CSV header in "${this.filePath}" does not match the expected column contract.`,
-          `Expected: ${EXPECTED_HEADERS.join(',')}`,
-          `Found:    ${normalizedHeader.join(',')}`,
+          `CSV header in "${this.filePath}" does not match a recognized column contract.`,
+          `Legacy contract: ${LEGACY_HEADERS.join(',')}`,
+          `Human export contract requires (any order/extra columns OK): ${Object.keys(HUMAN_HEADER_FIELD_MAP).join(', ')}`,
+          `Found: ${normalizedHeader.join(',')}`,
         ].join('\n')
       );
     }
 
-    return dataRows
-      .filter((r) => r.some((cell) => cell.trim() !== ''))
-      .map((cols, idx) => rowFromColumns(idx + 2, cols)); // +2: 1-based, skip header row
+    const nonEmptyDataRows = dataRows.filter((r) => r.some((cell) => cell.trim() !== ''));
+
+    if (isLegacy) {
+      return nonEmptyDataRows.map((cols, idx) => legacyRowFromColumns(idx + 2, cols)); // +2: 1-based, skip header row
+    }
+
+    const readHumanRow = buildHumanRowReader(normalizedHeader);
+    return nonEmptyDataRows.map((cols, idx) => readHumanRow(idx + 2, cols));
   }
 }
 
@@ -135,6 +258,10 @@ export const DEFAULT_TAB_NAME = 'Alex Tax Assessors';
  * (no googleapis dependency needed — plain fetch). Requires a credential
  * supplied via env var; this is an EXTERNAL PREREQUISITE that this script
  * cannot fabricate. See scripts/README.md for setup instructions.
+ *
+ * Still reads the legacy positional A-L layout (the live sheet's shape).
+ * If/when the live sheet is reshaped to match the human CSV export, this
+ * adapter should switch to header-based mapping like CsvFileSource does.
  */
 export class GoogleSheetsSource implements ImportSource {
   private sheetId: string;
@@ -194,6 +321,6 @@ export class GoogleSheetsSource implements ImportSource {
     const values = data.values ?? [];
     return values
       .filter((r) => r.some((cell) => (cell ?? '').trim() !== ''))
-      .map((cols, idx) => rowFromColumns(idx + 2, cols)); // +2: A2 is row 2
+      .map((cols, idx) => legacyRowFromColumns(idx + 2, cols)); // +2: A2 is row 2
   }
 }

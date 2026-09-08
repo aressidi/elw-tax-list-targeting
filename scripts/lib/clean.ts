@@ -48,6 +48,25 @@ export function normalizeEmail(raw: string | undefined | null): string | null {
   return trimmed.toLowerCase();
 }
 
+/**
+ * Some source rows put a web-form URL in the Email Address cell instead of
+ * an email (e.g. a county with no public email, only a "contact us" form).
+ * Splits those apart so a URL never lands in tax_officials.email_address:
+ * "N/A" -> both null; "http(s)://..." -> email null, websiteUrl as-is;
+ * otherwise -> normalized email, websiteUrl null.
+ */
+export function parseEmailOrUrl(raw: string | undefined | null): {
+  email: string | null;
+  websiteUrl: string | null;
+} {
+  const trimmed = trimToNull(raw);
+  if (!trimmed) return { email: null, websiteUrl: null };
+  if (/^https?:\/\//i.test(trimmed)) {
+    return { email: null, websiteUrl: trimmed };
+  }
+  return { email: normalizeEmail(trimmed), websiteUrl: null };
+}
+
 export function normalizeTitle(raw: string | undefined | null): string {
   return trimToNull(raw) ?? 'Tax Collector';
 }

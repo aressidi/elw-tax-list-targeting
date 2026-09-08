@@ -23,9 +23,13 @@ export function printImportReport(report: ImportReport): void {
   lines.push(`Counties created:          ${report.countiesCreated}`);
   lines.push(`Officials created:         ${report.officialsCreated}`);
   lines.push(`Officials updated:         ${report.officialsUpdated}`);
+  lines.push(`Official website URLs set: ${report.officialWebsiteUrlsSet}`);
   lines.push(`List requests created:     ${report.listRequestsCreated}`);
   lines.push(`List requests updated:     ${report.listRequestsUpdated}`);
   lines.push(`Cost amounts parsed:       ${report.costParsedCount}`);
+  lines.push(`Price rows created:        ${report.pricesCreated}  (skipped as already existing: ${report.pricesSkippedExisting})`);
+  lines.push(`Events created:            ${report.eventsCreated}  (skipped as already existing: ${report.eventsSkippedExisting})`);
+  lines.push(`Status history created:    ${report.statusHistoryCreated}  (skipped as already existing: ${report.statusHistorySkippedExisting})`);
   lines.push(`Multi-contact counties:    ${report.multiContactCounties.length}`);
   if (report.multiContactCounties.length > 0) {
     for (const c of report.multiContactCounties) lines.push(`  - ${c}`);
