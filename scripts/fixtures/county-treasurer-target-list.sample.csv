@@ -1,0 +1,10 @@
+status,state,full_name,county,phone_number,email_address,county_alt,title,contact_status,list_status,notes,response
+M,SD *,Jordan Rivera,Pennington County Treasurer,605-555-0101,Jordan.Rivera@Pennington.example.gov,Pennington,,"Emailed, called",Provided!,First contact went smoothly,Attached is the list you requested.
+,SD,Casey Morgan,Pennington County Treasurer,,N/A,Pennington,Deputy Treasurer,Called,,Backup contact,
+Needs data extraction,WY,Taylor Brooks,Natrona County Treasurer,307-555-0110,taylor.brooks@natrona.example.gov,Natrona,Treasurer,Filled out form,$75 flat for list,,
+m,ID,,Ada Treasurer,,,Ada,,,Going to provide,Waiting on callback,
+,NM,Riley Chen,Bernalillo County Treasurer,505-555-0199,riley.chen@bernalillo.example.gov,Bernalillo,Tax Collector,Emailed,"$1 per page, 269 pages",Cost estimate provided over phone,269 pages at $1/page
+,AR,Morgan Lee,Pulaski County Treasurer,501-555-0142,N/A,Pulaski,,Called,Not providing,Declined citing policy,
+M,SC,Avery Patel,Charleston County Treasurer,843-555-0175,avery.patel@charleston.example.gov,Charleston,Treasurer,Filled out form,Pending written request,Requires formal FOIA letter,
+,NC,Jamie Fox,Wake County Treasurer,919-555-0188,jamie.fox@wake.example.gov,Wake,Tax Collector,"Emailed, called",Provided!,,List attached as CSV
+,VT *,Drew Sanders,Chittenden County Treasurer,802-555-0166,,Chittenden,,,,,
