@@ -1,28 +1,62 @@
 import { Link, useLocation } from 'wouter';
-import { 
-  LayoutDashboard, 
-  Map, 
-  Building2, 
-  Users, 
-  FileText, 
-  Mail 
+import {
+  LayoutDashboard,
+  Map,
+  Search,
+  Mail,
+  Inbox,
+  Settings as SettingsIcon,
+  Users,
+  FileText,
+  Send,
 } from 'lucide-react';
 
 interface LayoutProps {
   children: React.ReactNode;
 }
 
-const navItems = [
+const primaryNavItems = [
   { path: '/', label: 'Dashboard', icon: LayoutDashboard },
-  { path: '/states', label: 'States', icon: Map },
-  { path: '/counties', label: 'Counties', icon: Building2 },
+  { path: '/states', label: 'States & Counties', icon: Map },
+  { path: '/research-queue', label: 'Research Queue', icon: Search },
+  { path: '/email-campaigns', label: 'Email Campaigns', icon: Send },
+  { path: '/responses', label: 'Responses', icon: Inbox },
+  { path: '/settings', label: 'Settings', icon: SettingsIcon },
+];
+
+const secondaryNavItems = [
   { path: '/tax-officials', label: 'Tax Officials', icon: Users },
   { path: '/list-requests', label: 'List Requests', icon: FileText },
   { path: '/foia-templates', label: 'FOIA Templates', icon: Mail },
 ];
 
+function isActivePath(location: string, path: string): boolean {
+  if (path === '/') return location === '/';
+  return location === path || location.startsWith(`${path}/`);
+}
+
 export default function Layout({ children }: LayoutProps) {
   const [location] = useLocation();
+
+  const renderNavItem = (item: { path: string; label: string; icon: typeof Map }) => {
+    const Icon = item.icon;
+    const isActive = isActivePath(location, item.path);
+    return (
+      <Link
+        key={item.path}
+        href={item.path}
+        aria-current={isActive ? 'page' : undefined}
+        className={`flex items-center gap-3 px-4 py-3 rounded-md text-sm font-medium transition-colors ${
+          isActive
+            ? 'bg-blue-50 text-blue-700'
+            : 'text-gray-700 hover:bg-gray-50'
+        }`}
+      >
+        <Icon className="w-5 h-5" />
+        {item.label}
+      </Link>
+    );
+  };
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -38,6 +72,7 @@ export default function Layout({ children }: LayoutProps) {
                 Tax List Targeting
               </h1>
             </div>
+            <div className="text-sm text-gray-500">County Tax List Research</div>
           </div>
         </div>
       </header>
@@ -45,31 +80,22 @@ export default function Layout({ children }: LayoutProps) {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="flex gap-8">
           {/* Sidebar Navigation */}
-          <nav className="w-64 flex-shrink-0">
+          <nav className="w-64 flex-shrink-0 space-y-4">
             <div className="bg-white rounded-lg shadow-sm border p-2">
-              {navItems.map((item) => {
-                const Icon = item.icon;
-                const isActive = location === item.path;
-                return (
-                  <Link
-                    key={item.path}
-                    href={item.path}
-                    className={`flex items-center gap-3 px-4 py-3 rounded-md text-sm font-medium transition-colors ${
-                      isActive
-                        ? 'bg-blue-50 text-blue-700'
-                        : 'text-gray-700 hover:bg-gray-50'
-                    }`}
-                  >
-                    <Icon className="w-5 h-5" />
-                    {item.label}
-                  </Link>
-                );
-              })}
+              {primaryNavItems.map(renderNavItem)}
+            </div>
+            <div>
+              <p className="px-4 pb-2 text-xs font-semibold text-gray-400 uppercase tracking-wide">
+                Other Views
+              </p>
+              <div className="bg-white rounded-lg shadow-sm border p-2">
+                {secondaryNavItems.map(renderNavItem)}
+              </div>
             </div>
           </nav>
 
           {/* Main Content */}
-          <main className="flex-1">
+          <main className="flex-1 min-w-0">
             <div className="bg-white rounded-lg shadow-sm border p-6">
               {children}
             </div>

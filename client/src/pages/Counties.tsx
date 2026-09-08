@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
+import { Link } from 'wouter';
 import { Building2, MapPin } from 'lucide-react';
 
 interface County {
@@ -61,10 +62,13 @@ export default function Counties() {
             {counties?.map((county) => (
               <tr key={county.id} className="border-b hover:bg-gray-50">
                 <td className="py-3 px-4">
-                  <div className="flex items-center gap-2">
+                  <Link
+                    href={`/counties/${county.id}`}
+                    className="flex items-center gap-2 hover:text-blue-700"
+                  >
                     <Building2 className="w-4 h-4 text-gray-400" />
                     <span className="font-medium text-gray-900">{county.name}</span>
-                  </div>
+                  </Link>
                 </td>
                 <td className="py-3 px-4 text-gray-600">{county.state.name}</td>
                 <td className="py-3 px-4">
