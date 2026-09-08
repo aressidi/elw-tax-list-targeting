@@ -12,12 +12,31 @@ import {
   listRequestStatusHistory,
   emailTracking,
   processedLists,
+  countyResearchRuns,
 } from '../shared/schema.js';
+import { triggerCountyResearch } from './services/research/researchService.js';
 
 const router = Router();
 
 const TARGET_PRIORITIES = ['high', 'medium', 'low'] as const;
 type TargetPriority = (typeof TARGET_PRIORITIES)[number];
+
+const RESEARCH_STATUSES = [
+  'not_started',
+  'in_progress',
+  'completed',
+  'needs_review',
+  'skipped',
+  'failed',
+] as const;
+type ResearchStatus = (typeof RESEARCH_STATUSES)[number];
+
+const CONFIDENCE_LEVELS = ['high', 'medium', 'low'] as const;
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const MAX_BULK_RESEARCH_COUNTIES = 25;
+const MAX_AI_IMPORT_CONTACTS = 20;
 
 // ============================================================
 // Helper Functions
@@ -40,6 +59,23 @@ function errorResponse(error: string, statusCode: number = 500) {
 
 function isTargetPriority(value: unknown): value is TargetPriority {
   return typeof value === 'string' && (TARGET_PRIORITIES as readonly string[]).includes(value);
+}
+
+function isResearchStatus(value: unknown): value is ResearchStatus {
+  return typeof value === 'string' && (RESEARCH_STATUSES as readonly string[]).includes(value);
+}
+
+function isConfidenceLevel(value: unknown): value is (typeof CONFIDENCE_LEVELS)[number] {
+  return typeof value === 'string' && (CONFIDENCE_LEVELS as readonly string[]).includes(value);
+}
+
+function isValidUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
 }
 
 function cleanString(value: unknown): string | null {
@@ -464,6 +500,398 @@ router.delete('/counties/:id', async (req, res) => {
   } catch (error) {
     console.error('Error deleting county:', error);
     res.status(500).json(errorResponse('Failed to delete county'));
+  }
+});
+
+// ============================================================
+// Research Queue & AI Contact Research Routes
+//
+// AI research results are never written directly into tax_officials.
+// They live in county_research_runs until a human explicitly approves
+// candidates via POST /api/counties/:id/contacts/ai-import.
+// ============================================================
+
+// GET /api/research-queue - Counties needing research, with filters and
+// latest-run metadata for the research queue UI
+router.get('/research-queue', async (req, res) => {
+  try {
+    const { limit, offset, page } = getPagination(req);
+    const { state: stateAbbreviation, priority, targetPriority, status, researchStatus } = req.query;
+
+    let conditions = [];
+    if (stateAbbreviation) {
+      const stateRow = await db.query.states.findFirst({
+        where: eq(states.abbreviation, (stateAbbreviation as string).toUpperCase()),
+      });
+      conditions.push(eq(counties.stateId, stateRow?.id ?? -1));
+    }
+
+    const priorityFilter = (targetPriority ?? priority) as string | undefined;
+    if (priorityFilter) {
+      if (!isTargetPriority(priorityFilter)) {
+        return res.status(400).json(errorResponse('Invalid targetPriority filter', 400));
+      }
+      conditions.push(eq(counties.targetPriority, priorityFilter));
+    }
+
+    const statusFilter = (researchStatus ?? status) as string | undefined;
+    if (statusFilter) {
+      if (!isResearchStatus(statusFilter)) {
+        return res.status(400).json(errorResponse('Invalid researchStatus filter', 400));
+      }
+      conditions.push(eq(counties.researchStatus, statusFilter));
+    }
+
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
+    const totalResult = await db.select({ count: count() }).from(counties).where(whereClause);
+    const total = totalResult[0]?.count || 0;
+
+    const results = await db.query.counties.findMany({
+      where: whereClause,
+      with: { state: true },
+      orderBy: asc(counties.name),
+      limit,
+      offset,
+    });
+
+    const countyIds = results.map((c) => c.id);
+    let contactCountByCounty = new Map<number, number>();
+    let latestRunByCounty = new Map<number, typeof countyResearchRuns.$inferSelect>();
+
+    if (countyIds.length > 0) {
+      const contactCounts = await db
+        .select({ countyId: taxOfficials.countyId, total: count() })
+        .from(taxOfficials)
+        .where(inArray(taxOfficials.countyId, countyIds))
+        .groupBy(taxOfficials.countyId);
+      contactCountByCounty = new Map(contactCounts.map((c) => [c.countyId, Number(c.total)]));
+
+      const runs = await db.query.countyResearchRuns.findMany({
+        where: inArray(countyResearchRuns.countyId, countyIds),
+        orderBy: desc(countyResearchRuns.requestedAt),
+      });
+      for (const run of runs) {
+        if (!latestRunByCounty.has(run.countyId)) {
+          latestRunByCounty.set(run.countyId, run);
+        }
+      }
+    }
+
+    const data = results.map((c) => {
+      const latestRun = latestRunByCounty.get(c.id);
+      return {
+        id: c.id,
+        name: c.name,
+        targetPriority: c.targetPriority,
+        researchStatus: c.researchStatus,
+        contactCount: contactCountByCounty.get(c.id) ?? 0,
+        state: c.state,
+        latestResearchRun: latestRun
+          ? {
+              id: latestRun.id,
+              status: latestRun.status,
+              provider: latestRun.provider,
+              isDemo: latestRun.isDemo,
+              requestedAt: latestRun.requestedAt,
+              completedAt: latestRun.completedAt,
+              errorMessage: latestRun.errorMessage,
+            }
+          : null,
+      };
+    });
+
+    res.json(successResponse(data, {
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      },
+    }));
+  } catch (error) {
+    console.error('Error fetching research queue:', error);
+    res.status(500).json(errorResponse('Failed to fetch research queue'));
+  }
+});
+
+// POST /api/counties/:id/research - Trigger AI research for a county.
+// Never writes contacts; only creates/updates a research run and the
+// county's research_status. Rate-limited and cached to avoid rapid-fire
+// duplicate provider calls (see server/services/research).
+router.post('/counties/:id/research', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) {
+      return res.status(400).json(errorResponse('Invalid county ID', 400));
+    }
+
+    const { provider, force } = req.body ?? {};
+    if (provider !== undefined && provider !== null && provider !== 'mock' && provider !== 'http') {
+      return res.status(400).json(errorResponse('provider must be "mock" or "http"', 400));
+    }
+
+    const result = await triggerCountyResearch(id, {
+      requestedProvider: provider ?? null,
+      force: force === true,
+    });
+
+    switch (result.kind) {
+      case 'not_found':
+        return res.status(404).json(errorResponse('County not found', 404));
+      case 'conflict':
+        return res.status(409).json(errorResponse(result.message, 409));
+      case 'rate_limited':
+        return res.status(429).json(errorResponse(result.message, 429));
+      case 'cached':
+        return res.json(successResponse(result.run, { cached: true }));
+      case 'failed':
+        if (result.providerUnavailable) {
+          return res
+            .status(503)
+            .json(errorResponse(result.error || 'No research provider configured.', 503));
+        }
+        // Provider ran but the attempt failed (e.g. nothing found, upstream error).
+        // This is a legitimate, recorded research outcome, not a server error.
+        return res.json(successResponse(result.run));
+      case 'completed':
+        return res.status(201).json(successResponse(result.run));
+      default:
+        return res.status(500).json(errorResponse('Unexpected research result'));
+    }
+  } catch (error) {
+    console.error('Error triggering research:', error);
+    res.status(500).json(errorResponse('Failed to trigger research'));
+  }
+});
+
+// GET /api/counties/:id/research-results - Get cached/past research runs for a county
+router.get('/counties/:id/research-results', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) {
+      return res.status(400).json(errorResponse('Invalid county ID', 400));
+    }
+
+    const county = await db.query.counties.findFirst({ where: eq(counties.id, id) });
+    if (!county) {
+      return res.status(404).json(errorResponse('County not found', 404));
+    }
+
+    const runs = await db.query.countyResearchRuns.findMany({
+      where: eq(countyResearchRuns.countyId, id),
+      orderBy: desc(countyResearchRuns.requestedAt),
+      limit: 10,
+    });
+
+    res.json(successResponse({ researchStatus: county.researchStatus, runs }));
+  } catch (error) {
+    console.error('Error fetching research results:', error);
+    res.status(500).json(errorResponse('Failed to fetch research results'));
+  }
+});
+
+// POST /api/counties/:id/contacts/ai-import - Save explicitly approved AI research
+// candidates (or manually-entered contacts) as real tax_officials. This is the ONLY
+// path that turns research candidates into contacts; nothing is imported automatically.
+router.post('/counties/:id/contacts/ai-import', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) {
+      return res.status(400).json(errorResponse('Invalid county ID', 400));
+    }
+
+    const county = await db.query.counties.findFirst({ where: eq(counties.id, id) });
+    if (!county) {
+      return res.status(404).json(errorResponse('County not found', 404));
+    }
+
+    const { runId, contacts } = req.body ?? {};
+    if (!Array.isArray(contacts) || contacts.length === 0) {
+      return res.status(400).json(errorResponse('contacts must be a non-empty array of approved candidates', 400));
+    }
+    if (contacts.length > MAX_AI_IMPORT_CONTACTS) {
+      return res.status(400).json(errorResponse(`contacts cannot exceed ${MAX_AI_IMPORT_CONTACTS} per request`, 400));
+    }
+
+    let parsedRunId: number | null = null;
+    if (runId !== undefined && runId !== null) {
+      parsedRunId = parseInt(runId);
+      if (isNaN(parsedRunId)) {
+        return res.status(400).json(errorResponse('Invalid runId', 400));
+      }
+      const run = await db.query.countyResearchRuns.findFirst({ where: eq(countyResearchRuns.id, parsedRunId) });
+      if (!run || run.countyId !== id) {
+        return res.status(400).json(errorResponse('Research run not found for this county', 400));
+      }
+    }
+
+    const primaryCount = contacts.filter((c: any) => c?.isPrimary === true).length;
+    if (primaryCount > 1) {
+      return res.status(400).json(errorResponse('Only one contact can be marked as primary', 400));
+    }
+
+    const prepared: Array<Record<string, unknown>> = [];
+    for (let index = 0; index < contacts.length; index++) {
+      const raw = contacts[index];
+      const fullName = cleanString(raw?.fullName);
+      if (!fullName) {
+        return res.status(400).json(errorResponse(`contacts[${index}].fullName is required`, 400));
+      }
+
+      const emailAddress = cleanString(raw?.emailAddress);
+      if (emailAddress && !EMAIL_REGEX.test(emailAddress)) {
+        return res.status(400).json(errorResponse(`contacts[${index}].emailAddress is not a valid email`, 400));
+      }
+
+      const websiteUrl = cleanString(raw?.websiteUrl);
+      if (websiteUrl && !isValidUrl(websiteUrl)) {
+        return res.status(400).json(errorResponse(`contacts[${index}].websiteUrl is not a valid URL`, 400));
+      }
+
+      const sourceUrl = cleanString(raw?.sourceUrl);
+      if (sourceUrl && !isValidUrl(sourceUrl)) {
+        return res.status(400).json(errorResponse(`contacts[${index}].sourceUrl is not a valid URL`, 400));
+      }
+
+      if (raw?.confidence !== undefined && raw?.confidence !== null && !isConfidenceLevel(raw.confidence)) {
+        return res.status(400).json(errorResponse(`contacts[${index}].confidence must be high, medium, or low`, 400));
+      }
+
+      prepared.push({
+        countyId: id,
+        fullName,
+        title: cleanString(raw?.title),
+        emailAddress,
+        phoneNumber: cleanString(raw?.phoneNumber),
+        officeAddress: cleanString(raw?.officeAddress),
+        websiteUrl,
+        notes: cleanString(raw?.sourceSnippet),
+        isPrimary: raw?.isPrimary === true,
+        researchSource: parsedRunId !== null ? 'ai_search' : 'manual',
+        confidenceScore: isConfidenceLevel(raw?.confidence) ? raw.confidence : null,
+        sourceUrl,
+      });
+    }
+
+    // Duplicate detection against existing contacts in the county (by name or email)
+    const existing = await db.query.taxOfficials.findMany({ where: eq(taxOfficials.countyId, id) });
+    const existingNames = new Set(existing.map((o) => o.fullName.trim().toLowerCase()));
+    const existingEmails = new Set(
+      existing.filter((o) => o.emailAddress).map((o) => o.emailAddress!.trim().toLowerCase())
+    );
+
+    const conflicts: string[] = [];
+    const seenNames = new Set<string>();
+    const seenEmails = new Set<string>();
+    for (const c of prepared) {
+      const nameKey = (c.fullName as string).toLowerCase();
+      const emailKey = c.emailAddress ? (c.emailAddress as string).toLowerCase() : null;
+
+      if (existingNames.has(nameKey)) {
+        conflicts.push(`"${c.fullName}" already exists for this county`);
+      } else if (emailKey && existingEmails.has(emailKey)) {
+        conflicts.push(`"${c.emailAddress}" already exists for this county`);
+      }
+
+      if (seenNames.has(nameKey)) {
+        conflicts.push(`Duplicate contact "${c.fullName}" in this submission`);
+      }
+      if (emailKey && seenEmails.has(emailKey)) {
+        conflicts.push(`Duplicate email "${c.emailAddress}" in this submission`);
+      }
+      seenNames.add(nameKey);
+      if (emailKey) seenEmails.add(emailKey);
+    }
+
+    if (conflicts.length > 0) {
+      return res.status(409).json(errorResponse(`Duplicate contact(s) detected: ${conflicts.join('; ')}`, 409));
+    }
+
+    const inserted = await db.transaction(async (tx) => {
+      if (prepared.some((c) => c.isPrimary)) {
+        await tx.update(taxOfficials).set({ isPrimary: false }).where(eq(taxOfficials.countyId, id));
+      }
+      const rows = [];
+      for (const c of prepared) {
+        const [row] = await tx.insert(taxOfficials).values(c as any).returning();
+        rows.push(row);
+      }
+      if (parsedRunId !== null) {
+        await tx.update(countyResearchRuns).set({ status: 'completed' }).where(eq(countyResearchRuns.id, parsedRunId));
+      }
+      await tx.update(counties).set({ researchStatus: 'completed' }).where(eq(counties.id, id));
+      return rows;
+    });
+
+    res.status(201).json(successResponse(inserted));
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      return res.status(409).json(errorResponse('Duplicate contact detected', 409));
+    }
+    console.error('Error importing AI contacts:', error);
+    res.status(500).json(errorResponse('Failed to import contacts'));
+  }
+});
+
+// POST /api/research/bulk - Bulk-trigger research or mark counties skipped.
+// Safe by construction: this endpoint only enqueues/records research runs or
+// updates research_status. It never writes tax_officials rows.
+router.post('/research/bulk', async (req, res) => {
+  try {
+    const { countyIds, action, provider, force } = req.body ?? {};
+
+    if (!Array.isArray(countyIds) || countyIds.length === 0) {
+      return res.status(400).json(errorResponse('countyIds must be a non-empty array', 400));
+    }
+    if (countyIds.length > MAX_BULK_RESEARCH_COUNTIES) {
+      return res.status(400).json(errorResponse(`countyIds cannot exceed ${MAX_BULK_RESEARCH_COUNTIES} per request`, 400));
+    }
+    if (action !== 'research' && action !== 'skip') {
+      return res.status(400).json(errorResponse('action must be "research" or "skip"', 400));
+    }
+    if (provider !== undefined && provider !== null && provider !== 'mock' && provider !== 'http') {
+      return res.status(400).json(errorResponse('provider must be "mock" or "http"', 400));
+    }
+
+    const parsedIds: number[] = [];
+    for (const raw of countyIds) {
+      const parsed = parseInt(raw);
+      if (isNaN(parsed)) {
+        return res.status(400).json(errorResponse('countyIds must contain valid numeric IDs', 400));
+      }
+      parsedIds.push(parsed);
+    }
+
+    const results: Array<Record<string, unknown>> = [];
+
+    if (action === 'skip') {
+      for (const countyId of parsedIds) {
+        const updated = await db
+          .update(counties)
+          .set({ researchStatus: 'skipped' })
+          .where(eq(counties.id, countyId))
+          .returning();
+        results.push({ countyId, status: updated.length ? 'skipped' : 'not_found' });
+      }
+    } else {
+      for (const countyId of parsedIds) {
+        const outcome = await triggerCountyResearch(countyId, {
+          requestedProvider: provider ?? null,
+          force: force === true,
+        });
+        results.push({
+          countyId,
+          status: outcome.kind,
+          message: 'message' in outcome ? outcome.message : ('error' in outcome ? outcome.error : undefined),
+        });
+      }
+    }
+
+    res.json(successResponse({ results }));
+  } catch (error) {
+    console.error('Error processing bulk research:', error);
+    res.status(500).json(errorResponse('Failed to process bulk research request'));
   }
 });
 

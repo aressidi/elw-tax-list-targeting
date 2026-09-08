@@ -29,6 +29,19 @@ export const paymentStatusEnum = pgEnum('payment_status', ['not_required', 'requ
 
 export const researchSourceEnum = pgEnum('research_source', ['ai_search', 'website', 'phone_call', 'manual', 'other']);
 
+export const researchStatusEnum = pgEnum('research_status', [
+  'not_started',
+  'in_progress',
+  'completed',
+  'needs_review',
+  'skipped',
+  'failed',
+]);
+
+export const confidenceLevelEnum = pgEnum('confidence_level', ['high', 'medium', 'low']);
+
+export const researchRunStatusEnum = pgEnum('research_run_status', ['in_progress', 'completed', 'failed']);
+
 export const emailTypeEnum = pgEnum('email_type', ['sent', 'received', 'follow_up']);
 
 export const fileTypeEnum = pgEnum('file_type', ['csv', 'pdf', 'excel', 'txt', 'other']);
@@ -104,12 +117,14 @@ export const counties = pgTable('counties', {
   population: integer('population'),
   targetPriority: targetPriorityEnum('target_priority').default('medium'),
   notes: text('notes'),
+  researchStatus: researchStatusEnum('research_status').default('not_started').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 }, (table) => ({
   stateIdx: index('counties_state_idx').on(table.stateId),
   nameIdx: index('counties_name_idx').on(table.name),
   priorityIdx: index('counties_priority_idx').on(table.targetPriority),
   stateNameIdx: uniqueIndex('counties_state_name_idx').on(table.stateId, table.name),
+  researchStatusIdx: index('counties_research_status_idx').on(table.researchStatus),
 }));
 
 // ====================
@@ -126,6 +141,8 @@ export const taxOfficials = pgTable('tax_officials', {
   websiteUrl: varchar('website_url', { length: 500 }),
   isPrimary: boolean('is_primary').default(false),
   researchSource: researchSourceEnum('research_source').default('manual'),
+  confidenceScore: confidenceLevelEnum('confidence_score'),
+  sourceUrl: varchar('source_url', { length: 500 }),
   verifiedAt: timestamp('verified_at', { withTimezone: true }),
   notes: text('notes'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
@@ -133,6 +150,28 @@ export const taxOfficials = pgTable('tax_officials', {
   countyIdx: index('tax_officials_county_idx').on(table.countyId),
   emailIdx: index('tax_officials_email_idx').on(table.emailAddress),
   primaryIdx: index('tax_officials_primary_idx').on(table.isPrimary),
+}));
+
+// ====================
+// County Research Runs Table
+// ====================
+export const countyResearchRuns = pgTable('county_research_runs', {
+  id: serial('id').primaryKey(),
+  countyId: integer('county_id').notNull().references(() => counties.id, { onDelete: 'cascade' }),
+  status: researchRunStatusEnum('status').notNull().default('in_progress'),
+  provider: varchar('provider', { length: 50 }).notNull(),
+  isDemo: boolean('is_demo').default(false).notNull(),
+  cacheKey: varchar('cache_key', { length: 255 }),
+  requestedAt: timestamp('requested_at', { withTimezone: true }).defaultNow().notNull(),
+  completedAt: timestamp('completed_at', { withTimezone: true }),
+  resultData: jsonb('result_data'),
+  errorMessage: text('error_message'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  countyIdx: index('county_research_runs_county_idx').on(table.countyId),
+  statusIdx: index('county_research_runs_status_idx').on(table.status),
+  cacheKeyIdx: index('county_research_runs_cache_key_idx').on(table.cacheKey),
+  requestedAtIdx: index('county_research_runs_requested_at_idx').on(table.requestedAt),
 }));
 
 // ====================
@@ -309,6 +348,14 @@ export const countiesRelations = relations(counties, ({ one, many }) => ({
     references: [states.id],
   }),
   taxOfficials: many(taxOfficials),
+  researchRuns: many(countyResearchRuns),
+}));
+
+export const countyResearchRunsRelations = relations(countyResearchRuns, ({ one }) => ({
+  county: one(counties, {
+    fields: [countyResearchRuns.countyId],
+    references: [counties.id],
+  }),
 }));
 
 export const taxOfficialsRelations = relations(taxOfficials, ({ one, many }) => ({
@@ -381,6 +428,7 @@ export const listRequestStatusHistoryRelations = relations(listRequestStatusHist
 export const insertStateSchema = createInsertSchema(states);
 export const insertCountySchema = createInsertSchema(counties);
 export const insertTaxOfficialSchema = createInsertSchema(taxOfficials);
+export const insertCountyResearchRunSchema = createInsertSchema(countyResearchRuns);
 export const insertFoiaTemplateSchema = createInsertSchema(foiaTemplates);
 export const insertListRequestSchema = createInsertSchema(listRequests);
 export const insertEmailTrackingSchema = createInsertSchema(emailTracking);
@@ -401,6 +449,9 @@ export type NewCounty = typeof counties.$inferInsert;
 
 export type TaxOfficial = typeof taxOfficials.$inferSelect;
 export type NewTaxOfficial = typeof taxOfficials.$inferInsert;
+
+export type CountyResearchRun = typeof countyResearchRuns.$inferSelect;
+export type NewCountyResearchRun = typeof countyResearchRuns.$inferInsert;
 
 export type FoiaTemplate = typeof foiaTemplates.$inferSelect;
 export type NewFoiaTemplate = typeof foiaTemplates.$inferInsert;

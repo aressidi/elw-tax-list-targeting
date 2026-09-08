@@ -1,5 +1,9 @@
 export type TargetPriority = 'high' | 'medium' | 'low';
 
+export type ResearchStatus = 'not_started' | 'in_progress' | 'completed' | 'needs_review' | 'skipped' | 'failed';
+
+export type ConfidenceLevel = 'high' | 'medium' | 'low';
+
 export interface State {
   id: number;
   abbreviation: string;
@@ -27,6 +31,7 @@ export interface CountySummary {
   population: number | null;
   targetPriority: TargetPriority | null;
   notes: string | null;
+  researchStatus: ResearchStatus;
   createdAt: string;
   contactCount: number;
   requestStatusSummary: Record<string, number>;
@@ -98,6 +103,9 @@ export interface TaxOfficial {
   officeAddress: string | null;
   websiteUrl: string | null;
   isPrimary: boolean | null;
+  researchSource: string | null;
+  confidenceScore: ConfidenceLevel | null;
+  sourceUrl: string | null;
   notes: string | null;
   createdAt: string;
   listRequests?: ListRequest[];
@@ -112,7 +120,62 @@ export interface CountyDetail {
   population: number | null;
   targetPriority: TargetPriority | null;
   notes: string | null;
+  researchStatus: ResearchStatus;
   createdAt: string;
   state: State;
   taxOfficials: TaxOfficial[];
+}
+
+// ====================
+// AI Contact Research (card 04)
+// ====================
+
+export interface ResearchCandidate {
+  fullName: string;
+  title: string | null;
+  emailAddress: string | null;
+  phoneNumber: string | null;
+  websiteUrl: string | null;
+  confidence: ConfidenceLevel;
+  sourceUrl: string | null;
+  sourceSnippet: string | null;
+}
+
+export interface ResearchRun {
+  id: number;
+  countyId: number;
+  status: 'in_progress' | 'completed' | 'failed';
+  provider: string;
+  isDemo: boolean;
+  requestedAt: string;
+  completedAt: string | null;
+  resultData: { candidates: ResearchCandidate[] } | null;
+  errorMessage: string | null;
+}
+
+export interface ResearchResultsResponse {
+  researchStatus: ResearchStatus;
+  runs: ResearchRun[];
+}
+
+export interface ResearchQueueEntry {
+  id: number;
+  name: string;
+  targetPriority: TargetPriority | null;
+  researchStatus: ResearchStatus;
+  contactCount: number;
+  state: {
+    id: number;
+    abbreviation: string;
+    name: string;
+  };
+  latestResearchRun: {
+    id: number;
+    status: 'in_progress' | 'completed' | 'failed';
+    provider: string;
+    isDemo: boolean;
+    requestedAt: string;
+    completedAt: string | null;
+    errorMessage: string | null;
+  } | null;
 }

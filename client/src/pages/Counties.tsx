@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'wouter';
-import { Building2, MapPin } from 'lucide-react';
+import { Building2, MapPin, Sparkles } from 'lucide-react';
 
 interface County {
   id: number;
@@ -46,7 +46,16 @@ export default function Counties() {
 
   return (
     <div>
-      <h2 className="text-2xl font-bold text-gray-900 mb-6">Counties</h2>
+      <div className="flex items-center justify-between mb-6">
+        <h2 className="text-2xl font-bold text-gray-900">Counties</h2>
+        <Link
+          href="/counties/new-with-research"
+          className="inline-flex items-center gap-2 bg-blue-600 text-white px-3 py-1.5 rounded-lg text-sm font-medium hover:bg-blue-700"
+        >
+          <Sparkles className="w-4 h-4" />
+          Add County with AI Research
+        </Link>
+      </div>
 
       <div className="overflow-x-auto">
         <table className="w-full">

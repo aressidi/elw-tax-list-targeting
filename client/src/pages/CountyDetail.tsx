@@ -9,6 +9,7 @@ import {
   Mail,
   Phone,
   Plus,
+  Sparkles,
   Star,
   Trash2,
   Pencil,
@@ -18,6 +19,8 @@ import { apiGet, apiSend, ApiError } from '../lib/api';
 import type { CountyDetail as CountyDetailType, ListRequest, TargetPriority, TaxOfficial } from '../types';
 import { LoadingState, ErrorState, EmptyState } from '../components/QueryState';
 import PriorityBadge from '../components/PriorityBadge';
+import ResearchStatusBadge from '../components/ResearchStatusBadge';
+import ResearchReviewPanel from '../components/ResearchReviewPanel';
 import Modal from '../components/Modal';
 import ConfirmDialog from '../components/ConfirmDialog';
 import ContactForm, { type ContactFormValues } from '../components/ContactForm';
@@ -62,6 +65,7 @@ export default function CountyDetail() {
   const [editingContact, setEditingContact] = useState<TaxOfficial | null>(null);
   const [deletingContact, setDeletingContact] = useState<TaxOfficial | null>(null);
   const [confirmDeleteCounty, setConfirmDeleteCounty] = useState(false);
+  const [showResearch, setShowResearch] = useState(false);
 
   const { data: county, isLoading, isError, refetch } = useQuery({
     queryKey: ['county', countyId],
@@ -225,18 +229,28 @@ export default function CountyDetail() {
           </div>
           <div>
             <h2 className="text-2xl font-bold text-gray-900">{county.name} County</h2>
-            <p className="text-sm text-gray-500">
+            <p className="text-sm text-gray-500 flex items-center gap-2">
               {county.state.name} ({county.state.abbreviation})
+              <ResearchStatusBadge status={county.researchStatus} />
             </p>
           </div>
         </div>
-        <button
-          onClick={() => setConfirmDeleteCounty(true)}
-          className="inline-flex items-center gap-2 text-sm font-medium text-red-600 hover:text-red-800 px-3 py-2 rounded-lg hover:bg-red-50"
-        >
-          <Trash2 className="w-4 h-4" />
-          Delete County
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowResearch(true)}
+            className="inline-flex items-center gap-2 text-sm font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 px-3 py-2 rounded-lg"
+          >
+            <Sparkles className="w-4 h-4" />
+            {county.researchStatus === 'not_started' ? 'Research Contacts' : 'Review Research'}
+          </button>
+          <button
+            onClick={() => setConfirmDeleteCounty(true)}
+            className="inline-flex items-center gap-2 text-sm font-medium text-red-600 hover:text-red-800 px-3 py-2 rounded-lg hover:bg-red-50"
+          >
+            <Trash2 className="w-4 h-4" />
+            Delete County
+          </button>
+        </div>
       </div>
 
       {/* Info cards */}
@@ -496,6 +510,13 @@ export default function CountyDetail() {
           busy={deleteCounty.isPending}
           onConfirm={() => deleteCounty.mutate()}
           onCancel={() => setConfirmDeleteCounty(false)}
+        />
+      )}
+
+      {showResearch && (
+        <ResearchReviewPanel
+          county={{ id: county.id, name: county.name, state: county.state }}
+          onClose={() => setShowResearch(false)}
         />
       )}
     </div>

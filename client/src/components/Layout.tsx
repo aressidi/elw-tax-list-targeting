@@ -18,7 +18,7 @@ interface LayoutProps {
 const primaryNavItems = [
   { path: '/', label: 'Dashboard', icon: LayoutDashboard },
   { path: '/states', label: 'States & Counties', icon: Map },
-  { path: '/research-queue', label: 'Research Queue', icon: Search },
+  { path: '/research', label: 'Research Queue', icon: Search },
   { path: '/email-campaigns', label: 'Email Campaigns', icon: Send },
   { path: '/responses', label: 'Responses', icon: Inbox },
   { path: '/settings', label: 'Settings', icon: SettingsIcon },
