@@ -393,12 +393,42 @@ export const processedLists = pgTable('processed_lists', {
   recordCount: integer('record_count'),
   mailingListCreated: boolean('mailing_list_created').default(false),
   mailingListExportPath: varchar('mailing_list_export_path', { length: 500 }),
+  // Card 12: standard-field -> raw-header mapping, e.g. { apn: "PARCEL_NO",
+  // owner_name: "OWNER_1", ... }. Set by POST /parse (auto-detected) and
+  // overwritten by POST /map-fields once a user confirms/edits it.
+  fieldMapping: jsonb('field_mapping'),
+  // Card 12: { totalRecords, validRecords, warningRecords, errorRecords,
+  // duplicateRecords } computed the last time the file was parsed/mapped.
+  validationSummary: jsonb('validation_summary'),
   processedAt: timestamp('processed_at', { withTimezone: true }),
   notes: text('notes'),
 }, (table) => ({
   requestIdx: index('processed_lists_request_idx').on(table.listRequestId),
   fileTypeIdx: index('processed_lists_file_type_idx').on(table.fileType),
   processedAtIdx: index('processed_lists_processed_at_idx').on(table.processedAt),
+}));
+
+// ====================
+// Processed List Records Table (card 12) — one row per parsed & mapped
+// record from a processed_lists file, persisted once a user approves a
+// field mapping via POST /map-fields. rawData keeps the original
+// header->value pairs for reference; mappedData holds the standard-field
+// view (see shared/dataFields.ts) that downstream features (mailing list
+// export, etc.) are expected to read from.
+// ====================
+export const processedListRecords = pgTable('processed_list_records', {
+  id: serial('id').primaryKey(),
+  processedListId: integer('processed_list_id').notNull().references(() => processedLists.id, { onDelete: 'cascade' }),
+  rawData: jsonb('raw_data').notNull(),
+  mappedData: jsonb('mapped_data').notNull(),
+  isValid: boolean('is_valid').default(true).notNull(),
+  validationErrors: text('validation_errors').array(),
+  isDuplicate: boolean('is_duplicate').default(false).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  processedListIdx: index('processed_list_records_processed_list_idx').on(table.processedListId),
+  isValidIdx: index('processed_list_records_is_valid_idx').on(table.isValid),
+  isDuplicateIdx: index('processed_list_records_is_duplicate_idx').on(table.isDuplicate),
 }));
 
 // ====================
@@ -536,10 +566,18 @@ export const emailQueueRelations = relations(emailQueue, ({ one }) => ({
   }),
 }));
 
-export const processedListsRelations = relations(processedLists, ({ one }) => ({
+export const processedListsRelations = relations(processedLists, ({ one, many }) => ({
   listRequest: one(listRequests, {
     fields: [processedLists.listRequestId],
     references: [listRequests.id],
+  }),
+  records: many(processedListRecords),
+}));
+
+export const processedListRecordsRelations = relations(processedListRecords, ({ one }) => ({
+  processedList: one(processedLists, {
+    fields: [processedListRecords.processedListId],
+    references: [processedLists.id],
   }),
 }));
 
@@ -579,6 +617,7 @@ export const insertEmailQueueSchema = createInsertSchema(emailQueue);
 export const insertEmailQueueSettingsSchema = createInsertSchema(emailQueueSettings);
 export const insertInboxItemSchema = createInsertSchema(inboxItems);
 export const insertProcessedListSchema = createInsertSchema(processedLists);
+export const insertProcessedListRecordSchema = createInsertSchema(processedListRecords);
 export const insertListRequestPriceSchema = createInsertSchema(listRequestPrices);
 export const insertListRequestEventSchema = createInsertSchema(listRequestEvents);
 export const insertListRequestStatusHistorySchema = createInsertSchema(listRequestStatusHistory);
@@ -623,6 +662,9 @@ export type ReviewClassification = (typeof reviewClassificationEnum.enumValues)[
 
 export type ProcessedList = typeof processedLists.$inferSelect;
 export type NewProcessedList = typeof processedLists.$inferInsert;
+
+export type ProcessedListRecord = typeof processedListRecords.$inferSelect;
+export type NewProcessedListRecord = typeof processedListRecords.$inferInsert;
 
 export type ListRequestPrice = typeof listRequestPrices.$inferSelect;
 export type NewListRequestPrice = typeof listRequestPrices.$inferInsert;

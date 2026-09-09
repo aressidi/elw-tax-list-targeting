@@ -1,11 +1,12 @@
 import { useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Download, Eye, FileText, Trash2, UploadCloud } from 'lucide-react';
+import { Download, Eye, FileText, ListChecks, Trash2, UploadCloud } from 'lucide-react';
 import { apiGet, apiSend, apiUpload, ApiError } from '../lib/api';
 import type { ProcessedListFile } from '../types';
 import Modal from './Modal';
 import ConfirmDialog from './ConfirmDialog';
 import FilePreviewModal from './FilePreviewModal';
+import FieldMappingModal from './FieldMappingModal';
 import { LoadingState, ErrorState, EmptyState } from './QueryState';
 import { useToast } from './Toast';
 
@@ -53,6 +54,7 @@ export default function FileUploadDialog({ listRequestId, requestLabel, onClose,
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [previewingFile, setPreviewingFile] = useState<ProcessedListFile | null>(null);
   const [deletingFile, setDeletingFile] = useState<ProcessedListFile | null>(null);
+  const [mappingFile, setMappingFile] = useState<ProcessedListFile | null>(null);
 
   const filesQuery = useQuery({
     queryKey: ['list-requests', listRequestId, 'files'],
@@ -188,6 +190,9 @@ export default function FileUploadDialog({ listRequestId, requestLabel, onClose,
                       <p className="text-sm font-medium text-gray-900 truncate">{file.originalFilename}</p>
                       <p className="text-xs text-gray-500">
                         {file.fileType?.toUpperCase() ?? 'FILE'} &middot; {formatSize(file.fileSizeBytes)}
+                        {file.rawDataStored && file.recordCount !== null && (
+                          <> &middot; {file.recordCount} record{file.recordCount === 1 ? '' : 's'} mapped</>
+                        )}
                         {file.processedAt && <> &middot; {new Date(file.processedAt).toLocaleString()}</>}
                       </p>
                     </div>
@@ -199,6 +204,15 @@ export default function FileUploadDialog({ listRequestId, requestLabel, onClose,
                       className="p-1.5 text-gray-500 hover:text-blue-700 hover:bg-blue-50 rounded-lg"
                     >
                       <Eye className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => setMappingFile(file)}
+                      title="Map fields & validate"
+                      className={`p-1.5 rounded-lg hover:bg-blue-50 hover:text-blue-700 ${
+                        file.rawDataStored ? 'text-green-600' : 'text-gray-500'
+                      }`}
+                    >
+                      <ListChecks className="w-4 h-4" />
                     </button>
                     <a
                       href={`/api/processed-lists/${file.id}/download`}
@@ -244,6 +258,15 @@ export default function FileUploadDialog({ listRequestId, requestLabel, onClose,
           busy={deleteFile.isPending}
           onConfirm={() => deleteFile.mutate(deletingFile.id)}
           onCancel={() => setDeletingFile(null)}
+        />
+      )}
+
+      {mappingFile && (
+        <FieldMappingModal
+          fileId={mappingFile.id}
+          fileName={mappingFile.originalFilename ?? 'file'}
+          onClose={() => setMappingFile(null)}
+          onChanged={invalidate}
         />
       )}
     </Modal>

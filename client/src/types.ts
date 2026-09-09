@@ -433,6 +433,8 @@ export interface ProcessedListFile {
   recordCount: number | null;
   mailingListCreated: boolean | null;
   mailingListExportPath: string | null;
+  fieldMapping: Partial<Record<StandardFieldId, string | null>> | null;
+  validationSummary: ValidationSummary | null;
   processedAt: string | null;
   notes: string | null;
 }
@@ -468,4 +470,69 @@ export interface FilePreviewResponse {
     fileSizeBytes: number | null;
   };
   preview: FilePreview;
+}
+
+// ====================
+// Data Parsing & Validation (card 12)
+// ====================
+
+export type StandardFieldId =
+  | 'apn'
+  | 'owner_name'
+  | 'property_address'
+  | 'mailing_address'
+  | 'amount_due'
+  | 'property_description';
+
+export type FieldMapping = Partial<Record<StandardFieldId, string | null>>;
+
+export interface ValidationSummary {
+  totalRecords: number;
+  validRecords: number;
+  warningRecords: number;
+  errorRecords: number;
+  duplicateRecords: number;
+}
+
+export interface ParsedRecordPreview {
+  rawData: Record<string, string>;
+  mappedData: Partial<Record<StandardFieldId, string | number | null>>;
+  isValid: boolean;
+  isDuplicate: boolean;
+  validationErrors: string[];
+}
+
+export interface ParseFileResponse {
+  headers: string[];
+  rowCount: number;
+  mapping: FieldMapping | null;
+  sampleRecords: ParsedRecordPreview[];
+  validationSummary: ValidationSummary | null;
+  sourceFormat: 'csv' | 'txt' | 'excel' | 'pdf' | 'unsupported';
+  warnings: string[];
+}
+
+export interface FieldMappingResponse {
+  headers: string[];
+  mapping: FieldMapping | null;
+  validationSummary: ValidationSummary | null;
+  recordCount: number | null;
+  sourceFormat: 'csv' | 'txt' | 'excel' | 'pdf' | 'unsupported';
+  warnings: string[];
+}
+
+export interface MapFieldsResponse {
+  processedList: ProcessedListFile;
+  validationSummary: ValidationSummary;
+}
+
+export interface ProcessedListRecord {
+  id: number;
+  processedListId: number;
+  rawData: Record<string, string>;
+  mappedData: Partial<Record<StandardFieldId, string | number | null>>;
+  isValid: boolean;
+  validationErrors: string[] | null;
+  isDuplicate: boolean;
+  createdAt: string;
 }
