@@ -71,6 +71,13 @@
       "when": 1788986608190,
       "tag": "0009_hesitant_thunderball",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1788987718512,
+      "tag": "0010_majestic_penance",
+      "breakpoints": true
     }
   ]
 }
