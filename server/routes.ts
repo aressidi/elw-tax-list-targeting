@@ -15,6 +15,13 @@ import {
   countyResearchRuns,
 } from '../shared/schema.js';
 import { triggerCountyResearch } from './services/research/researchService.js';
+import {
+  analyzeTemplateVariables,
+  renderTemplateText,
+  SUPPORTED_VARIABLE_KEYS,
+  DEFAULT_SAMPLE_DATA,
+  type TemplateSampleData,
+} from '../shared/templateVariables.js';
 
 const router = Router();
 
@@ -1451,6 +1458,322 @@ router.post('/foia-templates', async (req, res) => {
   } catch (error) {
     console.error('Error creating FOIA template:', error);
     res.status(500).json(errorResponse('Failed to create FOIA template'));
+  }
+});
+
+// ============================================================
+// Templates Routes (card 06) — FOIA request template CRUD, variable
+// validation, live preview, and single-default enforcement.
+// "/api/foia-templates" (GET list/:id/default, POST) remains available
+// above for backward compatibility; both surfaces share the same table.
+// ============================================================
+
+const TEMPLATE_NAME_MAX = 100;
+const TEMPLATE_SUBJECT_MAX = 500;
+const TEMPLATE_BODY_MAX = 10000;
+
+interface TemplateFieldUpdate {
+  name?: string;
+  subjectLine?: string;
+  bodyText?: string;
+}
+
+function validateTemplateFields(
+  body: any,
+  { requireAll }: { requireAll: boolean }
+): { error: string } | TemplateFieldUpdate {
+  const result: TemplateFieldUpdate = {};
+
+  if (requireAll || body?.name !== undefined) {
+    const name = cleanString(body?.name);
+    if (!name) return { error: 'name is required' };
+    if (name.length > TEMPLATE_NAME_MAX) return { error: `name must be ${TEMPLATE_NAME_MAX} characters or fewer` };
+    result.name = name;
+  }
+  if (requireAll || body?.subjectLine !== undefined) {
+    const subjectLine = cleanString(body?.subjectLine);
+    if (!subjectLine) return { error: 'subjectLine is required' };
+    if (subjectLine.length > TEMPLATE_SUBJECT_MAX) {
+      return { error: `subjectLine must be ${TEMPLATE_SUBJECT_MAX} characters or fewer` };
+    }
+    result.subjectLine = subjectLine;
+  }
+  if (requireAll || body?.bodyText !== undefined) {
+    const bodyText = typeof body?.bodyText === 'string' ? body.bodyText : '';
+    if (!bodyText.trim()) return { error: 'bodyText is required' };
+    if (bodyText.length > TEMPLATE_BODY_MAX) {
+      return { error: `bodyText must be ${TEMPLATE_BODY_MAX} characters or fewer` };
+    }
+    result.bodyText = bodyText;
+  }
+
+  return result;
+}
+
+// Rejects unknown {{variables}} and requires at least one supported variable,
+// so every saved template stays personalizable and no unrecognized token can
+// ever be mistaken for something the renderer will execute.
+function templateVariableError(subjectLine: string, bodyText: string): string | null {
+  const { unknown, known } = analyzeTemplateVariables(subjectLine, bodyText);
+  if (unknown.length > 0) {
+    return `Unknown template variable(s): ${unknown.map((v) => `{{${v}}}`).join(', ')}`;
+  }
+  if (known.length === 0) {
+    return `Template must use at least one supported variable: ${SUPPORTED_VARIABLE_KEYS.map((v) => `{{${v}}}`).join(', ')}`;
+  }
+  return null;
+}
+
+// GET /api/templates - List all templates, default first
+router.get('/templates', async (_req, res) => {
+  try {
+    const results = await db.query.foiaTemplates.findMany({
+      orderBy: [desc(foiaTemplates.isDefault), asc(foiaTemplates.name)],
+    });
+    res.json(successResponse(results));
+  } catch (error) {
+    console.error('Error fetching templates:', error);
+    res.status(500).json(errorResponse('Failed to fetch templates'));
+  }
+});
+
+// GET /api/templates/:id - Get a single template
+router.get('/templates/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json(errorResponse('Invalid template ID', 400));
+
+    const template = await db.query.foiaTemplates.findFirst({ where: eq(foiaTemplates.id, id) });
+    if (!template) return res.status(404).json(errorResponse('Template not found', 404));
+
+    res.json(successResponse(template));
+  } catch (error) {
+    console.error('Error fetching template:', error);
+    res.status(500).json(errorResponse('Failed to fetch template'));
+  }
+});
+
+// POST /api/templates - Create a template. The first template ever created
+// is always made default; later ones default only if isDefault is requested,
+// which unsets any existing default in the same transaction.
+router.post('/templates', async (req, res) => {
+  try {
+    const validation = validateTemplateFields(req.body ?? {}, { requireAll: true });
+    if ('error' in validation) return res.status(400).json(errorResponse(validation.error, 400));
+    const { name, subjectLine, bodyText } = validation as Required<TemplateFieldUpdate>;
+
+    const variableError = templateVariableError(subjectLine, bodyText);
+    if (variableError) return res.status(400).json(errorResponse(variableError, 400));
+
+    const existingCount = await db.select({ count: count() }).from(foiaTemplates);
+    const isFirstTemplate = (existingCount[0]?.count ?? 0) === 0;
+    const shouldBeDefault = req.body?.isDefault === true || isFirstTemplate;
+
+    const result = await db.transaction(async (tx) => {
+      if (shouldBeDefault) {
+        await tx.update(foiaTemplates).set({ isDefault: false }).where(eq(foiaTemplates.isDefault, true));
+      }
+      return tx.insert(foiaTemplates).values({ name, subjectLine, bodyText, isDefault: shouldBeDefault }).returning();
+    });
+
+    res.status(201).json(successResponse(result[0]));
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      return res.status(409).json(errorResponse('A template with this name already exists', 409));
+    }
+    console.error('Error creating template:', error);
+    res.status(500).json(errorResponse('Failed to create template'));
+  }
+});
+
+// PATCH /api/templates/:id - Update a template's fields and/or default status.
+// Field edits and setting isDefault:true can be combined in one request;
+// isDefault:false is rejected while the template is still the default (use
+// set-default on another template instead, which keeps exactly one default).
+router.patch('/templates/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json(errorResponse('Invalid template ID', 400));
+
+    const existing = await db.query.foiaTemplates.findFirst({ where: eq(foiaTemplates.id, id) });
+    if (!existing) return res.status(404).json(errorResponse('Template not found', 404));
+
+    const validation = validateTemplateFields(req.body ?? {}, { requireAll: false });
+    if ('error' in validation) return res.status(400).json(errorResponse(validation.error, 400));
+
+    const effectiveSubject = validation.subjectLine ?? existing.subjectLine;
+    const effectiveBody = validation.bodyText ?? existing.bodyText;
+    const variableError = templateVariableError(effectiveSubject, effectiveBody);
+    if (variableError) return res.status(400).json(errorResponse(variableError, 400));
+
+    const updateData: Record<string, unknown> = { ...validation };
+    const hasFieldUpdates = Object.keys(updateData).length > 0;
+    const isDefaultProvided = req.body?.isDefault !== undefined;
+    const setDefaultTrue = isDefaultProvided && req.body.isDefault === true;
+    const setDefaultFalse = isDefaultProvided && req.body.isDefault === false;
+
+    if (setDefaultFalse && existing.isDefault) {
+      return res.status(409).json(
+        errorResponse('Cannot unset the default template directly; set another template as default instead', 409)
+      );
+    }
+
+    if (!hasFieldUpdates && !isDefaultProvided) {
+      return res.status(400).json(errorResponse('No valid fields to update', 400));
+    }
+
+    let result;
+    if (setDefaultTrue && !existing.isDefault) {
+      result = await db.transaction(async (tx) => {
+        await tx.update(foiaTemplates).set({ isDefault: false }).where(eq(foiaTemplates.isDefault, true));
+        return tx
+          .update(foiaTemplates)
+          .set({ ...updateData, isDefault: true })
+          .where(eq(foiaTemplates.id, id))
+          .returning();
+      });
+    } else if (hasFieldUpdates) {
+      result = await db.update(foiaTemplates).set(updateData).where(eq(foiaTemplates.id, id)).returning();
+    } else {
+      // isDefault was provided but is already a no-op (true-and-already-default,
+      // or false-and-already-not-default) and no other fields changed.
+      result = [existing];
+    }
+
+    res.json(successResponse(result[0]));
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      return res.status(409).json(errorResponse('A template with this name already exists', 409));
+    }
+    console.error('Error updating template:', error);
+    res.status(500).json(errorResponse('Failed to update template'));
+  }
+});
+
+// DELETE /api/templates/:id - Delete a non-default template. Deleting the
+// default is blocked (409) until another template has been made default.
+router.delete('/templates/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json(errorResponse('Invalid template ID', 400));
+
+    const existing = await db.query.foiaTemplates.findFirst({ where: eq(foiaTemplates.id, id) });
+    if (!existing) return res.status(404).json(errorResponse('Template not found', 404));
+
+    if (existing.isDefault) {
+      return res.status(409).json(
+        errorResponse('Cannot delete the default template. Set another template as default first.', 409)
+      );
+    }
+
+    await db.delete(foiaTemplates).where(eq(foiaTemplates.id, id));
+    res.json(successResponse({ id, deleted: true }));
+  } catch (error) {
+    console.error('Error deleting template:', error);
+    res.status(500).json(errorResponse('Failed to delete template'));
+  }
+});
+
+// POST /api/templates/:id/set-default - Make this template the default,
+// unsetting any other default in the same transaction so exactly one
+// template is ever marked default.
+router.post('/templates/:id/set-default', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json(errorResponse('Invalid template ID', 400));
+
+    const existing = await db.query.foiaTemplates.findFirst({ where: eq(foiaTemplates.id, id) });
+    if (!existing) return res.status(404).json(errorResponse('Template not found', 404));
+
+    if (existing.isDefault) {
+      return res.json(successResponse(existing));
+    }
+
+    const result = await db.transaction(async (tx) => {
+      await tx.update(foiaTemplates).set({ isDefault: false }).where(eq(foiaTemplates.isDefault, true));
+      return tx.update(foiaTemplates).set({ isDefault: true }).where(eq(foiaTemplates.id, id)).returning();
+    });
+
+    res.json(successResponse(result[0]));
+  } catch (error) {
+    console.error('Error setting default template:', error);
+    res.status(500).json(errorResponse('Failed to set default template'));
+  }
+});
+
+// POST /api/templates/:id/preview - Render a template with sample or real
+// (read-only) county/contact data. Never writes anything; unknown variables
+// are surfaced in the response but never evaluated.
+router.post('/templates/:id/preview', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json(errorResponse('Invalid template ID', 400));
+
+    const template = await db.query.foiaTemplates.findFirst({ where: eq(foiaTemplates.id, id) });
+    if (!template) return res.status(404).json(errorResponse('Template not found', 404));
+
+    const { sampleData, countyId, contactId, customNote } = req.body ?? {};
+    let resolvedSample: TemplateSampleData;
+
+    if (sampleData && typeof sampleData === 'object') {
+      resolvedSample = {
+        countyName: cleanString(sampleData.countyName) ?? DEFAULT_SAMPLE_DATA.countyName,
+        stateName: cleanString(sampleData.stateName) ?? DEFAULT_SAMPLE_DATA.stateName,
+        stateAbbr: cleanString(sampleData.stateAbbr) ?? DEFAULT_SAMPLE_DATA.stateAbbr,
+        officialName: cleanString(sampleData.officialName) ?? DEFAULT_SAMPLE_DATA.officialName,
+        officialTitle: cleanString(sampleData.officialTitle) ?? DEFAULT_SAMPLE_DATA.officialTitle,
+        customNote: cleanString(sampleData.customNote) ?? '',
+      };
+    } else if (countyId !== undefined && countyId !== null) {
+      const parsedCountyId = parseInt(countyId);
+      if (isNaN(parsedCountyId)) return res.status(400).json(errorResponse('Invalid countyId', 400));
+
+      const county = await db.query.counties.findFirst({
+        where: eq(counties.id, parsedCountyId),
+        with: { state: true },
+      });
+      if (!county) return res.status(400).json(errorResponse('County not found', 400));
+
+      let officialName = DEFAULT_SAMPLE_DATA.officialName;
+      let officialTitle = DEFAULT_SAMPLE_DATA.officialTitle;
+      if (contactId !== undefined && contactId !== null) {
+        const parsedContactId = parseInt(contactId);
+        if (isNaN(parsedContactId)) return res.status(400).json(errorResponse('Invalid contactId', 400));
+
+        const contact = await db.query.taxOfficials.findFirst({ where: eq(taxOfficials.id, parsedContactId) });
+        if (!contact || contact.countyId !== parsedCountyId) {
+          return res.status(400).json(errorResponse('Contact not found for this county', 400));
+        }
+        officialName = contact.fullName;
+        officialTitle = contact.title || DEFAULT_SAMPLE_DATA.officialTitle;
+      }
+
+      resolvedSample = {
+        countyName: county.name,
+        stateName: county.state.name,
+        stateAbbr: county.state.abbreviation,
+        officialName,
+        officialTitle,
+        customNote: cleanString(customNote) ?? '',
+      };
+    } else {
+      resolvedSample = { ...DEFAULT_SAMPLE_DATA, customNote: cleanString(customNote) ?? '' };
+    }
+
+    const { unknown, used } = analyzeTemplateVariables(template.subjectLine, template.bodyText);
+
+    res.json(
+      successResponse({
+        subject: renderTemplateText(template.subjectLine, resolvedSample),
+        body: renderTemplateText(template.bodyText, resolvedSample),
+        sampleData: resolvedSample,
+        usedVariables: used,
+        unknownVariables: unknown,
+      })
+    );
+  } catch (error) {
+    console.error('Error previewing template:', error);
+    res.status(500).json(errorResponse('Failed to preview template'));
   }
 });
 

@@ -17,6 +17,8 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
+    host: true, // bind all interfaces so the app is reachable over Tailscale
+    allowedHosts: ['.ts.net'], // permit tailnet MagicDNS hostnames
     port: 5173,
     proxy: {
       '/api': {

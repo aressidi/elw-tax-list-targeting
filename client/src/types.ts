@@ -175,6 +175,34 @@ export interface ResearchResultsResponse {
   runs: ResearchRun[];
 }
 
+// ====================
+// FOIA Templates (card 06)
+// ====================
+
+export interface FoiaTemplate {
+  id: number;
+  name: string;
+  subjectLine: string;
+  bodyText: string;
+  isDefault: boolean;
+  createdAt: string;
+}
+
+export interface TemplatePreviewResult {
+  subject: string;
+  body: string;
+  sampleData: {
+    countyName: string;
+    stateName: string;
+    stateAbbr: string;
+    officialName: string;
+    officialTitle: string;
+    customNote?: string;
+  };
+  usedVariables: string[];
+  unknownVariables: string[];
+}
+
 export interface ResearchQueueEntry {
   id: number;
   name: string;
