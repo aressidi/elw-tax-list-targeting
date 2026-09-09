@@ -15,6 +15,7 @@ import TemplateEditor from './pages/TemplateEditor';
 import ResearchQueue from './pages/ResearchQueue';
 import NewCountyWithResearch from './pages/NewCountyWithResearch';
 import EmailCampaigns from './pages/EmailCampaigns';
+import EmailQueue from './pages/EmailQueue';
 import Responses from './pages/Responses';
 import Settings from './pages/Settings';
 
@@ -46,6 +47,7 @@ function App() {
               <Redirect to="/research" />
             </Route>
             <Route path="/email-campaigns" component={EmailCampaigns} />
+            <Route path="/email-queue" component={EmailQueue} />
             <Route path="/responses" component={Responses} />
             <Route path="/settings" component={Settings} />
           </Layout>

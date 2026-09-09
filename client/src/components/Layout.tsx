@@ -9,6 +9,7 @@ import {
   Users,
   FileText,
   Send,
+  Timer,
 } from 'lucide-react';
 
 interface LayoutProps {
@@ -21,6 +22,7 @@ const primaryNavItems = [
   { path: '/contacts', label: 'Contacts', icon: Users },
   { path: '/research', label: 'Research Queue', icon: Search },
   { path: '/email-campaigns', label: 'Email Campaigns', icon: Send },
+  { path: '/email-queue', label: 'Email Queue', icon: Timer },
   { path: '/responses', label: 'Responses', icon: Inbox },
   { path: '/settings', label: 'Settings', icon: SettingsIcon },
 ];

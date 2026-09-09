@@ -252,6 +252,71 @@ export interface EmailBulkSendResponse {
   summary: EmailBulkSendSummary;
 }
 
+// ====================
+// Email Queue & Throttle (card 08)
+// ====================
+
+export type EmailQueueItemStatus = 'queued' | 'sending' | 'sent' | 'failed' | 'cancelled';
+
+export interface EmailQueueEntry {
+  id: number;
+  listRequestId: number;
+  status: EmailQueueItemStatus;
+  queuedAt: string;
+  sendAt: string | null;
+  sentAt: string | null;
+  error: string | null;
+  listRequest: {
+    id: number;
+    requestStatus: string;
+    taxOfficial: {
+      fullName: string;
+      emailAddress: string | null;
+      county: {
+        name: string;
+        state: { abbreviation: string; name: string };
+      };
+    };
+  };
+}
+
+export interface EmailQueueStatus {
+  paused: boolean;
+  dailyLimit: number;
+  sentToday: number;
+  realSentToday: number;
+  pending: number;
+  dueNow: number;
+  scheduled: number;
+  failedToday: number;
+}
+
+export interface EmailQueueSettingsRow {
+  id: number;
+  dailyLimit: number;
+  paused: boolean;
+  updatedAt: string;
+}
+
+export interface EnqueueResultItem {
+  listRequestId: number;
+  outcome: 'queued' | 'skipped' | 'failed';
+  queueId?: number;
+  error?: string;
+}
+
+export interface EnqueueBulkSummary {
+  total: number;
+  queued: number;
+  skipped: number;
+  failed: number;
+}
+
+export interface EnqueueBulkResponse {
+  results: EnqueueResultItem[];
+  summary: EnqueueBulkSummary;
+}
+
 export interface ResearchQueueEntry {
   id: number;
   name: string;

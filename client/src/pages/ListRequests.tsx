@@ -1,10 +1,12 @@
 import { useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { FileText, Clock, CheckCircle, XCircle, Send } from 'lucide-react';
+import { FileText, Clock, CheckCircle, XCircle, Send, Timer } from 'lucide-react';
 import { apiGet } from '../lib/api';
 import { LoadingState, ErrorState, EmptyState } from '../components/QueryState';
 import SendEmailDialog from '../components/SendEmailDialog';
 import BulkSendEmailDialog from '../components/BulkSendEmailDialog';
+import BulkEnqueueEmailDialog from '../components/BulkEnqueueEmailDialog';
+import EnqueueEmailDialog from '../components/EnqueueEmailDialog';
 
 interface ListRequestRow {
   id: number;
@@ -12,6 +14,8 @@ interface ListRequestRow {
   listType: string;
   costAmount: string | null;
   emailSentAt: string | null;
+  queuedAt: string | null;
+  scheduledSendAt: string | null;
   responseReceivedAt: string | null;
   assignedTo: string | null;
   createdAt: string;
@@ -30,7 +34,9 @@ export default function ListRequests() {
   const queryClient = useQueryClient();
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [sendingRequest, setSendingRequest] = useState<ListRequestRow | null>(null);
+  const [enqueuingRequest, setEnqueuingRequest] = useState<ListRequestRow | null>(null);
   const [showBulkSend, setShowBulkSend] = useState(false);
+  const [showBulkEnqueue, setShowBulkEnqueue] = useState(false);
 
   const { data: requests, isLoading, isError, refetch } = useQuery({
     queryKey: ['list-requests'],
@@ -120,6 +126,13 @@ export default function ListRequests() {
                 <Send className="w-4 h-4" />
                 Send Selected ({selectedIdList.length})
               </button>
+              <button
+                onClick={() => setShowBulkEnqueue(true)}
+                className="inline-flex items-center gap-2 bg-gray-700 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-gray-800"
+              >
+                <Timer className="w-4 h-4" />
+                Add to Queue ({selectedIdList.length})
+              </button>
             </>
           )}
         </div>
@@ -189,18 +202,35 @@ export default function ListRequests() {
                   <td className="py-3 px-4 text-xs text-gray-500">
                     {request.emailSentAt ? (
                       <span className="text-green-700">Sent {new Date(request.emailSentAt).toLocaleDateString()}</span>
+                    ) : request.queuedAt ? (
+                      <span className="text-blue-700">
+                        {request.scheduledSendAt
+                          ? `Scheduled ${new Date(request.scheduledSendAt).toLocaleString()}`
+                          : 'Queued'}
+                      </span>
                     ) : (
                       <span className="text-gray-400">Not sent</span>
                     )}
                   </td>
                   <td className="py-3 px-4 text-right">
-                    <button
-                      onClick={() => setSendingRequest(request)}
-                      className="inline-flex items-center gap-1.5 text-sm font-medium text-blue-700 hover:text-blue-900"
-                    >
-                      <Send className="w-3.5 h-3.5" />
-                      {request.emailSentAt ? 'Resend' : 'Send'}
-                    </button>
+                    <div className="flex items-center justify-end gap-3">
+                      {!request.queuedAt && (
+                        <button
+                          onClick={() => setEnqueuingRequest(request)}
+                          className="inline-flex items-center gap-1.5 text-sm font-medium text-gray-600 hover:text-gray-900"
+                        >
+                          <Timer className="w-3.5 h-3.5" />
+                          Queue
+                        </button>
+                      )}
+                      <button
+                        onClick={() => setSendingRequest(request)}
+                        className="inline-flex items-center gap-1.5 text-sm font-medium text-blue-700 hover:text-blue-900"
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                        {request.emailSentAt ? 'Resend' : 'Send'}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -219,10 +249,30 @@ export default function ListRequests() {
         />
       )}
 
+      {enqueuingRequest && (
+        <EnqueueEmailDialog
+          listRequestId={enqueuingRequest.id}
+          recipientLabel={`${enqueuingRequest.taxOfficial.county.name} County primary contact`}
+          onClose={() => setEnqueuingRequest(null)}
+          onQueued={invalidate}
+        />
+      )}
+
       {showBulkSend && (
         <BulkSendEmailDialog
           requestIds={selectedIdList}
           onClose={() => setShowBulkSend(false)}
+          onDone={() => {
+            invalidate();
+            clearSelection();
+          }}
+        />
+      )}
+
+      {showBulkEnqueue && (
+        <BulkEnqueueEmailDialog
+          requestIds={selectedIdList}
+          onClose={() => setShowBulkEnqueue(false)}
           onDone={() => {
             invalidate();
             clearSelection();

@@ -88,6 +88,14 @@ export const eventChannelEnum = pgEnum('event_channel', [
   'other'
 ]);
 
+export const emailQueueStatusEnum = pgEnum('email_queue_status', [
+  'queued',
+  'sending',
+  'sent',
+  'failed',
+  'cancelled'
+]);
+
 // ====================
 // States Table
 // ====================
@@ -209,6 +217,8 @@ export const listRequests = pgTable('list_requests', {
   paymentStatus: paymentStatusEnum('payment_status').default('not_required'),
   foiaTemplateId: integer('foia_template_id').references(() => foiaTemplates.id, { onDelete: 'set null' }),
   emailSentAt: timestamp('email_sent_at', { withTimezone: true }),
+  queuedAt: timestamp('queued_at', { withTimezone: true }),
+  scheduledSendAt: timestamp('scheduled_send_at', { withTimezone: true }),
   responseReceivedAt: timestamp('response_received_at', { withTimezone: true }),
   responseSummary: text('response_summary'),
   fullResponseText: text('full_response_text'),
@@ -253,6 +263,39 @@ export const emailTracking = pgTable('email_tracking', {
   gmailIdx: index('email_tracking_gmail_idx').on(table.gmailMessageId),
   processedIdx: index('email_tracking_processed_idx').on(table.processed),
 }));
+
+// ====================
+// Email Queue Table (card 08) — source of truth for throttled/scheduled
+// sends. listRequests.queuedAt/scheduledSendAt mirror the active row here
+// for cheap display without a join; this table is what the scheduler reads.
+// ====================
+export const emailQueue = pgTable('email_queue', {
+  id: serial('id').primaryKey(),
+  listRequestId: integer('list_request_id').notNull().references(() => listRequests.id, { onDelete: 'cascade' }),
+  status: emailQueueStatusEnum('status').default('queued').notNull(),
+  queuedAt: timestamp('queued_at', { withTimezone: true }).defaultNow().notNull(),
+  sendAt: timestamp('send_at', { withTimezone: true }),
+  sentAt: timestamp('sent_at', { withTimezone: true }),
+  error: text('error'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  requestIdx: index('email_queue_request_idx').on(table.listRequestId),
+  statusIdx: index('email_queue_status_idx').on(table.status),
+  sendAtIdx: index('email_queue_send_at_idx').on(table.sendAt),
+}));
+
+// ====================
+// Email Queue Settings Table (card 08) — single-row table holding the
+// throttle configuration. Read/created lazily by queueService; there is
+// intentionally no seed migration for it.
+// ====================
+export const emailQueueSettings = pgTable('email_queue_settings', {
+  id: serial('id').primaryKey(),
+  dailyLimit: integer('daily_limit').default(20).notNull(),
+  paused: boolean('paused').default(false).notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
 
 // ====================
 // Processed Lists Table
@@ -380,6 +423,7 @@ export const listRequestsRelations = relations(listRequests, ({ one, many }) => 
     references: [foiaTemplates.id],
   }),
   emailTracking: many(emailTracking),
+  emailQueueEntries: many(emailQueue),
   processedLists: many(processedLists),
   prices: many(listRequestPrices),
   events: many(listRequestEvents),
@@ -389,6 +433,13 @@ export const listRequestsRelations = relations(listRequests, ({ one, many }) => 
 export const emailTrackingRelations = relations(emailTracking, ({ one }) => ({
   listRequest: one(listRequests, {
     fields: [emailTracking.listRequestId],
+    references: [listRequests.id],
+  }),
+}));
+
+export const emailQueueRelations = relations(emailQueue, ({ one }) => ({
+  listRequest: one(listRequests, {
+    fields: [emailQueue.listRequestId],
     references: [listRequests.id],
   }),
 }));
@@ -432,6 +483,8 @@ export const insertCountyResearchRunSchema = createInsertSchema(countyResearchRu
 export const insertFoiaTemplateSchema = createInsertSchema(foiaTemplates);
 export const insertListRequestSchema = createInsertSchema(listRequests);
 export const insertEmailTrackingSchema = createInsertSchema(emailTracking);
+export const insertEmailQueueSchema = createInsertSchema(emailQueue);
+export const insertEmailQueueSettingsSchema = createInsertSchema(emailQueueSettings);
 export const insertProcessedListSchema = createInsertSchema(processedLists);
 export const insertListRequestPriceSchema = createInsertSchema(listRequestPrices);
 export const insertListRequestEventSchema = createInsertSchema(listRequestEvents);
@@ -461,6 +514,12 @@ export type NewListRequest = typeof listRequests.$inferInsert;
 
 export type EmailTracking = typeof emailTracking.$inferSelect;
 export type NewEmailTracking = typeof emailTracking.$inferInsert;
+
+export type EmailQueueItem = typeof emailQueue.$inferSelect;
+export type NewEmailQueueItem = typeof emailQueue.$inferInsert;
+
+export type EmailQueueSettingsRow = typeof emailQueueSettings.$inferSelect;
+export type NewEmailQueueSettingsRow = typeof emailQueueSettings.$inferInsert;
 
 export type ProcessedList = typeof processedLists.$inferSelect;
 export type NewProcessedList = typeof processedLists.$inferInsert;

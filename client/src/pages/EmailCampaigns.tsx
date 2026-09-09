@@ -1,14 +1,16 @@
 import { useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Send, Info } from 'lucide-react';
+import { Send, Timer, Info } from 'lucide-react';
 import { apiGet } from '../lib/api';
 import { LoadingState, ErrorState, EmptyState } from '../components/QueryState';
 import BulkSendEmailDialog from '../components/BulkSendEmailDialog';
+import BulkEnqueueEmailDialog from '../components/BulkEnqueueEmailDialog';
 
 interface CampaignRow {
   id: number;
   requestStatus: string;
   emailSentAt: string | null;
+  queuedAt: string | null;
   taxOfficial: {
     fullName: string;
     emailAddress: string | null;
@@ -29,6 +31,7 @@ export default function EmailCampaigns() {
   const queryClient = useQueryClient();
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [showBulkSend, setShowBulkSend] = useState(false);
+  const [showBulkEnqueue, setShowBulkEnqueue] = useState(false);
 
   const { data: requests, isLoading, isError, refetch } = useQuery({
     queryKey: ['list-requests', 'campaigns'],
@@ -88,6 +91,13 @@ export default function EmailCampaigns() {
                 <Send className="w-4 h-4" />
                 Send Selected ({selectedIdList.length})
               </button>
+              <button
+                onClick={() => setShowBulkEnqueue(true)}
+                className="inline-flex items-center gap-2 bg-gray-700 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-gray-800"
+              >
+                <Timer className="w-4 h-4" />
+                Add to Queue ({selectedIdList.length})
+              </button>
             </>
           )}
         </div>
@@ -117,6 +127,7 @@ export default function EmailCampaigns() {
                 <th className="text-left py-3 px-4 font-medium text-gray-700">County</th>
                 <th className="text-left py-3 px-4 font-medium text-gray-700">Contact on File</th>
                 <th className="text-left py-3 px-4 font-medium text-gray-700">Status</th>
+                <th className="text-left py-3 px-4 font-medium text-gray-700">Queue</th>
               </tr>
             </thead>
             <tbody>
@@ -145,6 +156,13 @@ export default function EmailCampaigns() {
                       {request.requestStatus.replace(/_/g, ' ')}
                     </span>
                   </td>
+                  <td className="py-3 px-4 text-xs text-gray-500">
+                    {request.queuedAt ? (
+                      <span className="text-blue-700">Queued</span>
+                    ) : (
+                      <span className="text-gray-400">Not queued</span>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -156,6 +174,17 @@ export default function EmailCampaigns() {
         <BulkSendEmailDialog
           requestIds={selectedIdList}
           onClose={() => setShowBulkSend(false)}
+          onDone={() => {
+            queryClient.invalidateQueries({ queryKey: ['list-requests'] });
+            clearSelection();
+          }}
+        />
+      )}
+
+      {showBulkEnqueue && (
+        <BulkEnqueueEmailDialog
+          requestIds={selectedIdList}
+          onClose={() => setShowBulkEnqueue(false)}
           onDone={() => {
             queryClient.invalidateQueries({ queryKey: ['list-requests'] });
             clearSelection();
