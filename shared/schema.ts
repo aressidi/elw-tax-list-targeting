@@ -96,6 +96,30 @@ export const emailQueueStatusEnum = pgEnum('email_queue_status', [
   'cancelled'
 ]);
 
+export const inboxItemStatusEnum = pgEnum('inbox_item_status', [
+  'unprocessed',
+  'matched',
+  'unmatched',
+  'reviewed',
+  'attached'
+]);
+
+export const inboxMatchMethodEnum = pgEnum('inbox_match_method', [
+  'thread_id',
+  'subject',
+  'from_address',
+  'manual'
+]);
+
+export const inboxClassificationEnum = pgEnum('inbox_classification', [
+  'list_received',
+  'fee_quote',
+  'fee_paid',
+  'clarification',
+  'rejection',
+  'other'
+]);
+
 // ====================
 // States Table
 // ====================
@@ -298,6 +322,35 @@ export const emailQueueSettings = pgTable('email_queue_settings', {
 });
 
 // ====================
+// Inbox Items Table (card 09) — every inbound message a poll (mock or
+// live gog) has seen, whether or not it could be matched to a request.
+// gmailMessageId is the dedupe key: a poll never re-processes a message
+// it has already recorded here.
+// ====================
+export const inboxItems = pgTable('inbox_items', {
+  id: serial('id').primaryKey(),
+  gmailMessageId: varchar('gmail_message_id', { length: 100 }).notNull(),
+  threadId: varchar('thread_id', { length: 100 }),
+  fromAddress: varchar('from_address', { length: 200 }),
+  subject: varchar('subject', { length: 500 }),
+  bodyText: text('body_text'),
+  receivedAt: timestamp('received_at', { withTimezone: true }),
+  listRequestId: integer('list_request_id').references(() => listRequests.id, { onDelete: 'set null' }),
+  matchConfidence: integer('match_confidence').default(0),
+  matchMethod: inboxMatchMethodEnum('match_method'),
+  classification: inboxClassificationEnum('classification'),
+  status: inboxItemStatusEnum('status').default('unprocessed').notNull(),
+  attachmentMetadata: jsonb('attachment_metadata'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  gmailMessageIdIdx: uniqueIndex('inbox_items_gmail_message_id_idx').on(table.gmailMessageId),
+  threadIdIdx: index('inbox_items_thread_id_idx').on(table.threadId),
+  listRequestIdx: index('inbox_items_list_request_idx').on(table.listRequestId),
+  statusIdx: index('inbox_items_status_idx').on(table.status),
+  classificationIdx: index('inbox_items_classification_idx').on(table.classification),
+}));
+
+// ====================
 // Processed Lists Table
 // ====================
 export const processedLists = pgTable('processed_lists', {
@@ -428,6 +481,14 @@ export const listRequestsRelations = relations(listRequests, ({ one, many }) => 
   prices: many(listRequestPrices),
   events: many(listRequestEvents),
   statusHistory: many(listRequestStatusHistory),
+  inboxItems: many(inboxItems),
+}));
+
+export const inboxItemsRelations = relations(inboxItems, ({ one }) => ({
+  listRequest: one(listRequests, {
+    fields: [inboxItems.listRequestId],
+    references: [listRequests.id],
+  }),
 }));
 
 export const emailTrackingRelations = relations(emailTracking, ({ one }) => ({
@@ -485,6 +546,7 @@ export const insertListRequestSchema = createInsertSchema(listRequests);
 export const insertEmailTrackingSchema = createInsertSchema(emailTracking);
 export const insertEmailQueueSchema = createInsertSchema(emailQueue);
 export const insertEmailQueueSettingsSchema = createInsertSchema(emailQueueSettings);
+export const insertInboxItemSchema = createInsertSchema(inboxItems);
 export const insertProcessedListSchema = createInsertSchema(processedLists);
 export const insertListRequestPriceSchema = createInsertSchema(listRequestPrices);
 export const insertListRequestEventSchema = createInsertSchema(listRequestEvents);
@@ -520,6 +582,12 @@ export type NewEmailQueueItem = typeof emailQueue.$inferInsert;
 
 export type EmailQueueSettingsRow = typeof emailQueueSettings.$inferSelect;
 export type NewEmailQueueSettingsRow = typeof emailQueueSettings.$inferInsert;
+
+export type InboxItem = typeof inboxItems.$inferSelect;
+export type NewInboxItem = typeof inboxItems.$inferInsert;
+export type InboxItemStatus = (typeof inboxItemStatusEnum.enumValues)[number];
+export type InboxMatchMethod = (typeof inboxMatchMethodEnum.enumValues)[number];
+export type InboxClassification = (typeof inboxClassificationEnum.enumValues)[number];
 
 export type ProcessedList = typeof processedLists.$inferSelect;
 export type NewProcessedList = typeof processedLists.$inferInsert;

@@ -317,6 +317,66 @@ export interface EnqueueBulkResponse {
   summary: EnqueueBulkSummary;
 }
 
+// ====================
+// Gmail Inbox Monitoring (card 09)
+// ====================
+
+export type InboxProviderName = 'mock' | 'gog';
+
+export type InboxItemStatus = 'unprocessed' | 'matched' | 'unmatched' | 'reviewed' | 'attached';
+
+export type InboxMatchMethod = 'thread_id' | 'subject' | 'from_address' | 'manual';
+
+export type InboxClassification =
+  | 'list_received'
+  | 'fee_quote'
+  | 'fee_paid'
+  | 'clarification'
+  | 'rejection'
+  | 'other';
+
+export interface InboxAttachmentMeta {
+  filename: string;
+  sizeBytes: number;
+  kind: string;
+}
+
+export interface InboxItem {
+  id: number;
+  gmailMessageId: string;
+  threadId: string | null;
+  fromAddress: string | null;
+  subject: string | null;
+  bodyText: string | null;
+  receivedAt: string | null;
+  listRequestId: number | null;
+  matchConfidence: number | null;
+  matchMethod: InboxMatchMethod | null;
+  classification: InboxClassification | null;
+  status: InboxItemStatus;
+  attachmentMetadata: InboxAttachmentMeta[] | null;
+  createdAt: string;
+  listRequest: {
+    id: number;
+    requestStatus: string;
+    taxOfficial: {
+      fullName: string;
+      emailAddress: string | null;
+      county: {
+        name: string;
+        state: { abbreviation: string; name: string };
+      };
+    };
+  } | null;
+}
+
+export interface PollInboxResult {
+  provider: InboxProviderName;
+  fetched: number;
+  newItemsCount: number;
+  items: InboxItem[];
+}
+
 export interface ResearchQueueEntry {
   id: number;
   name: string;

@@ -6,6 +6,7 @@ import routes from './routes.js';
 import { db } from './db.js';
 import { foiaTemplates } from '../shared/schema.js';
 import { startQueueProcessor } from './services/queueService.js';
+import { startInboxPoller } from './services/inboxService.js';
 
 dotenv.config();
 
@@ -114,6 +115,8 @@ ensureDefaultTemplate().catch((error) => {
 startQueueProcessor().catch((error) => {
   console.error('Failed to start email queue processor:', error);
 });
+
+startInboxPoller();
 
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
