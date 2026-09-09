@@ -1,12 +1,13 @@
 import { useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Download, Eye, FileText, ListChecks, Trash2, UploadCloud } from 'lucide-react';
+import { Download, Eye, FileDown, FileText, ListChecks, Trash2, UploadCloud } from 'lucide-react';
 import { apiGet, apiSend, apiUpload, ApiError } from '../lib/api';
 import type { ProcessedListFile } from '../types';
 import Modal from './Modal';
 import ConfirmDialog from './ConfirmDialog';
 import FilePreviewModal from './FilePreviewModal';
 import FieldMappingModal from './FieldMappingModal';
+import ExportModal from './ExportModal';
 import { LoadingState, ErrorState, EmptyState } from './QueryState';
 import { useToast } from './Toast';
 
@@ -55,6 +56,7 @@ export default function FileUploadDialog({ listRequestId, requestLabel, onClose,
   const [previewingFile, setPreviewingFile] = useState<ProcessedListFile | null>(null);
   const [deletingFile, setDeletingFile] = useState<ProcessedListFile | null>(null);
   const [mappingFile, setMappingFile] = useState<ProcessedListFile | null>(null);
+  const [exportingFile, setExportingFile] = useState<ProcessedListFile | null>(null);
 
   const filesQuery = useQuery({
     queryKey: ['list-requests', listRequestId, 'files'],
@@ -214,6 +216,16 @@ export default function FileUploadDialog({ listRequestId, requestLabel, onClose,
                     >
                       <ListChecks className="w-4 h-4" />
                     </button>
+                    <button
+                      onClick={() => setExportingFile(file)}
+                      disabled={!file.rawDataStored || !file.recordCount}
+                      title="Export to ELW mailing list format"
+                      className={`p-1.5 rounded-lg hover:bg-blue-50 hover:text-blue-700 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-gray-500 ${
+                        file.mailingListCreated ? 'text-green-600' : 'text-gray-500'
+                      }`}
+                    >
+                      <FileDown className="w-4 h-4" />
+                    </button>
                     <a
                       href={`/api/processed-lists/${file.id}/download`}
                       title="Download"
@@ -266,6 +278,15 @@ export default function FileUploadDialog({ listRequestId, requestLabel, onClose,
           fileId={mappingFile.id}
           fileName={mappingFile.originalFilename ?? 'file'}
           onClose={() => setMappingFile(null)}
+          onChanged={invalidate}
+        />
+      )}
+
+      {exportingFile && (
+        <ExportModal
+          fileId={exportingFile.id}
+          fileName={exportingFile.originalFilename ?? 'file'}
+          onClose={() => setExportingFile(null)}
           onChanged={invalidate}
         />
       )}
