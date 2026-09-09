@@ -41,6 +41,7 @@ import {
   updateDailyLimit,
 } from './services/queueService.js';
 import { pollInbox, getActiveInboxProvider } from './services/inboxService.js';
+import { applyReviewClassification } from './services/responseClassification.js';
 
 const router = Router();
 
@@ -81,6 +82,16 @@ const REQUEST_STATUSES = [
 ] as const;
 type RequestStatus = (typeof REQUEST_STATUSES)[number];
 
+const REVIEW_CLASSIFICATIONS = [
+  'list_provided',
+  'requires_payment',
+  'requires_form',
+  'not_available',
+  'needs_clarification',
+  'declined',
+] as const;
+type ReviewClassificationValue = (typeof REVIEW_CLASSIFICATIONS)[number];
+
 // ============================================================
 // Helper Functions
 // ============================================================
@@ -114,6 +125,10 @@ function isConfidenceLevel(value: unknown): value is (typeof CONFIDENCE_LEVELS)[
 
 function isRequestStatus(value: unknown): value is RequestStatus {
   return typeof value === 'string' && (REQUEST_STATUSES as readonly string[]).includes(value);
+}
+
+function isReviewClassification(value: unknown): value is ReviewClassificationValue {
+  return typeof value === 'string' && (REVIEW_CLASSIFICATIONS as readonly string[]).includes(value);
 }
 
 function isValidUrl(value: string): boolean {
@@ -1964,6 +1979,34 @@ router.patch('/list-requests/:id', async (req, res) => {
   }
 });
 
+// PATCH /api/list-requests/:id/classify - Human response-classification
+// review (card 10). Sets request_status from the review vocabulary, fills
+// in response/cost fields, and records a status-history + event row. Use
+// this for classifying a request directly; POST /api/responses/:id/process
+// is the equivalent entry point starting from an inbox item.
+router.patch('/list-requests/:id/classify', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json(errorResponse('Invalid list request ID', 400));
+
+    const { classification, amount, currency, formUrl, notes } = req.body ?? {};
+    if (!isReviewClassification(classification)) {
+      return res.status(400).json(errorResponse(`classification must be one of: ${REVIEW_CLASSIFICATIONS.join(', ')}`, 400));
+    }
+    if (formUrl && !isValidUrl(formUrl)) {
+      return res.status(400).json(errorResponse('formUrl must be a valid http(s) URL', 400));
+    }
+
+    const result = await applyReviewClassification(id, { classification, amount, currency, formUrl, notes, sourceItem: null });
+    if (!result) return res.status(404).json(errorResponse('List request not found', 404));
+
+    res.json(successResponse(result.listRequest));
+  } catch (error) {
+    console.error('Error classifying list request:', error);
+    res.status(500).json(errorResponse('Failed to classify list request'));
+  }
+});
+
 // ============================================================
 // Email Sending (card 07)
 //
@@ -2468,6 +2511,84 @@ router.post('/inbox/:id/status', async (req, res) => {
   } catch (error) {
     console.error('Error updating inbox item status:', error);
     res.status(500).json(errorResponse('Failed to update inbox item status'));
+  }
+});
+
+// POST /api/responses/:id/process - Human response-classification review
+// (card 10), starting from an inbox item (:id). Body: { classification,
+// amount?, currency?, formUrl?, notes?, listRequestId? }. classification is
+// one of the review vocabulary (distinct from the inbox item's auto
+// `classification` field); listRequestId lets the reviewer link/relink the
+// message to a request in the same call if it wasn't matched automatically.
+// Updates the linked list_request (status, response/cost fields, history +
+// event row via applyReviewClassification) and marks the inbox item
+// reviewed with the review fields recorded for audit.
+router.post('/responses/:id/process', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json(errorResponse('Invalid inbox item ID', 400));
+
+    const item = await db.query.inboxItems.findFirst({ where: eq(inboxItems.id, id) });
+    if (!item) return res.status(404).json(errorResponse('Inbox item not found', 404));
+
+    const { classification, amount, currency, formUrl, notes, listRequestId } = req.body ?? {};
+    if (!isReviewClassification(classification)) {
+      return res.status(400).json(errorResponse(`classification must be one of: ${REVIEW_CLASSIFICATIONS.join(', ')}`, 400));
+    }
+    if (formUrl && !isValidUrl(formUrl)) {
+      return res.status(400).json(errorResponse('formUrl must be a valid http(s) URL', 400));
+    }
+
+    let targetListRequestId = item.listRequestId;
+    let relinkTo: number | null = null;
+
+    if (listRequestId !== undefined && listRequestId !== null) {
+      const parsed = parseInt(listRequestId);
+      if (isNaN(parsed)) return res.status(400).json(errorResponse('listRequestId must be numeric', 400));
+      const exists = await db.query.listRequests.findFirst({ where: eq(listRequests.id, parsed) });
+      if (!exists) return res.status(400).json(errorResponse('List request not found', 400));
+      targetListRequestId = parsed;
+      if (parsed !== item.listRequestId) relinkTo = parsed;
+    }
+
+    if (!targetListRequestId) {
+      return res
+        .status(400)
+        .json(errorResponse('This message is not linked to a list request yet — link it first or pass listRequestId', 400));
+    }
+
+    const result = await applyReviewClassification(targetListRequestId, {
+      classification,
+      amount,
+      currency,
+      formUrl,
+      notes,
+      sourceItem: item,
+    });
+    if (!result) return res.status(404).json(errorResponse('List request not found', 404));
+
+    const hasAmount = amount !== undefined && amount !== null && amount !== '';
+    const itemUpdate: Record<string, unknown> = {
+      reviewClassification: classification,
+      reviewNotes: notes || null,
+      reviewCostAmount: classification === 'requires_payment' && hasAmount ? String(amount) : null,
+      reviewCostCurrency: classification === 'requires_payment' ? (currency && currency.trim()) || 'USD' : null,
+      reviewFormUrl: classification === 'requires_form' ? formUrl || null : null,
+      reviewedAt: new Date(),
+      status: 'reviewed',
+    };
+    if (relinkTo !== null) {
+      itemUpdate.listRequestId = relinkTo;
+      itemUpdate.matchMethod = 'manual';
+      itemUpdate.matchConfidence = 100;
+    }
+
+    const [updatedItem] = await db.update(inboxItems).set(itemUpdate).where(eq(inboxItems.id, id)).returning();
+
+    res.json(successResponse({ inboxItem: updatedItem, listRequest: result.listRequest }));
+  } catch (error) {
+    console.error('Error processing response:', error);
+    res.status(500).json(errorResponse('Failed to process response'));
   }
 });
 
