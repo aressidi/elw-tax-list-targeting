@@ -1,12 +1,13 @@
 import { useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { FileText, Clock, CheckCircle, XCircle, Send, Timer } from 'lucide-react';
+import { FileText, Clock, CheckCircle, XCircle, Send, Timer, Paperclip } from 'lucide-react';
 import { apiGet } from '../lib/api';
 import { LoadingState, ErrorState, EmptyState } from '../components/QueryState';
 import SendEmailDialog from '../components/SendEmailDialog';
 import BulkSendEmailDialog from '../components/BulkSendEmailDialog';
 import BulkEnqueueEmailDialog from '../components/BulkEnqueueEmailDialog';
 import EnqueueEmailDialog from '../components/EnqueueEmailDialog';
+import FileUploadDialog from '../components/FileUploadDialog';
 
 interface ListRequestRow {
   id: number;
@@ -17,6 +18,7 @@ interface ListRequestRow {
   queuedAt: string | null;
   scheduledSendAt: string | null;
   responseReceivedAt: string | null;
+  listFileReceived: boolean | null;
   assignedTo: string | null;
   createdAt: string;
   taxOfficial: {
@@ -35,6 +37,7 @@ export default function ListRequests() {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [sendingRequest, setSendingRequest] = useState<ListRequestRow | null>(null);
   const [enqueuingRequest, setEnqueuingRequest] = useState<ListRequestRow | null>(null);
+  const [filesRequest, setFilesRequest] = useState<ListRequestRow | null>(null);
   const [showBulkSend, setShowBulkSend] = useState(false);
   const [showBulkEnqueue, setShowBulkEnqueue] = useState(false);
 
@@ -224,6 +227,15 @@ export default function ListRequests() {
                         </button>
                       )}
                       <button
+                        onClick={() => setFilesRequest(request)}
+                        className={`inline-flex items-center gap-1.5 text-sm font-medium ${
+                          request.listFileReceived ? 'text-green-700 hover:text-green-900' : 'text-gray-600 hover:text-gray-900'
+                        }`}
+                      >
+                        <Paperclip className="w-3.5 h-3.5" />
+                        Files
+                      </button>
+                      <button
                         onClick={() => setSendingRequest(request)}
                         className="inline-flex items-center gap-1.5 text-sm font-medium text-blue-700 hover:text-blue-900"
                       >
@@ -255,6 +267,15 @@ export default function ListRequests() {
           recipientLabel={`${enqueuingRequest.taxOfficial.county.name} County primary contact`}
           onClose={() => setEnqueuingRequest(null)}
           onQueued={invalidate}
+        />
+      )}
+
+      {filesRequest && (
+        <FileUploadDialog
+          listRequestId={filesRequest.id}
+          requestLabel={`${filesRequest.taxOfficial.county.name} County, ${filesRequest.taxOfficial.county.state.abbreviation}`}
+          onClose={() => setFilesRequest(null)}
+          onChanged={invalidate}
         />
       )}
 

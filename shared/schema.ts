@@ -382,6 +382,13 @@ export const processedLists = pgTable('processed_lists', {
   listRequestId: integer('list_request_id').notNull().references(() => listRequests.id, { onDelete: 'cascade' }),
   originalFilename: varchar('original_filename', { length: 255 }),
   fileType: fileTypeEnum('file_type'),
+  // Where the uploaded file lives on disk, relative to the repo root (e.g.
+  // "uploads/12-<uuid>.csv"). The stored filename is never the sanitized
+  // original -- see server/services/fileStorage.ts -- so this is the only
+  // way to find the bytes back given a row.
+  filePath: varchar('file_path', { length: 500 }),
+  fileSizeBytes: integer('file_size_bytes'),
+  mimeType: varchar('mime_type', { length: 100 }),
   rawDataStored: boolean('raw_data_stored').default(false),
   recordCount: integer('record_count'),
   mailingListCreated: boolean('mailing_list_created').default(false),

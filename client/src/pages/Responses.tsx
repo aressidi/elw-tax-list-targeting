@@ -10,11 +10,13 @@ import {
   PackageX,
   Paperclip,
   RefreshCw,
+  UploadCloud,
 } from 'lucide-react';
 import { apiGet, apiSend, ApiError } from '../lib/api';
 import { LoadingState, ErrorState, EmptyState } from '../components/QueryState';
 import { useToast } from '../components/Toast';
 import Modal from '../components/Modal';
+import FileUploadDialog from '../components/FileUploadDialog';
 import type { InboxClassification, InboxItem, InboxItemStatus, PollInboxResult, ReviewClassification } from '../types';
 
 const CLASSIFICATION_LABELS: Record<InboxClassification, string> = {
@@ -341,6 +343,7 @@ export default function Responses() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('unprocessed');
   const [linkingItem, setLinkingItem] = useState<InboxItem | null>(null);
   const [reviewingItem, setReviewingItem] = useState<InboxItem | null>(null);
+  const [uploadingForItem, setUploadingForItem] = useState<InboxItem | null>(null);
   const [expandedId, setExpandedId] = useState<number | null>(null);
 
   const settingsQuery = useQuery({
@@ -570,6 +573,15 @@ export default function Responses() {
                     <Link2 className="w-3.5 h-3.5" />
                     {item.listRequestId ? 'Relink' : 'Link Request'}
                   </button>
+                  {item.listRequestId && (
+                    <button
+                      onClick={() => setUploadingForItem(item)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-full border border-green-300 text-green-700 hover:bg-green-50"
+                    >
+                      <UploadCloud className="w-3.5 h-3.5" />
+                      Upload List File
+                    </button>
+                  )}
                   {item.status !== 'reviewed' && (
                     <button
                       onClick={() => setStatus.mutate({ id: item.id, status: 'reviewed' })}
@@ -674,6 +686,15 @@ export default function Responses() {
           onClose={() => setReviewingItem(null)}
           isSubmitting={process.isPending}
           onSubmit={(payload) => process.mutate({ id: reviewingItem.id, payload })}
+        />
+      )}
+
+      {uploadingForItem && uploadingForItem.listRequestId && (
+        <FileUploadDialog
+          listRequestId={uploadingForItem.listRequestId}
+          requestLabel={uploadingForItem.listRequest ? `${uploadingForItem.listRequest.taxOfficial.county.name} County` : undefined}
+          onClose={() => setUploadingForItem(null)}
+          onChanged={invalidate}
         />
       )}
     </div>
