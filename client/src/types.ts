@@ -86,6 +86,8 @@ export interface ListRequest {
   pricingBasis: string | null;
   responseSummary: string | null;
   assignedTo: string | null;
+  foiaTemplateId: number | null;
+  emailSentAt: string | null;
   createdAt: string;
   updatedAt: string;
   prices: ListRequestPrice[];
@@ -201,6 +203,53 @@ export interface TemplatePreviewResult {
   };
   usedVariables: string[];
   unknownVariables: string[];
+}
+
+// ====================
+// Email Sending (card 07)
+// ====================
+
+export type EmailTransportName = 'dry_run' | 'gog';
+
+export interface EmailSendPreview {
+  listRequestId: number;
+  recipientEmail: string;
+  subject: string;
+  body: string;
+  transport: EmailTransportName;
+  preview: true;
+}
+
+export interface EmailSendResult {
+  listRequestId: number;
+  outcome: 'sent';
+  transport: EmailTransportName;
+  messageId: string | null;
+  recipientEmail: string;
+  subject: string;
+  body: string;
+}
+
+export interface EmailBulkSendResultItem {
+  listRequestId: number;
+  outcome: 'sent' | 'skipped' | 'failed';
+  transport?: EmailTransportName;
+  messageId?: string | null;
+  recipientEmail?: string;
+  error?: string;
+}
+
+export interface EmailBulkSendSummary {
+  total: number;
+  sent: number;
+  skipped: number;
+  failed: number;
+  transport: EmailTransportName;
+}
+
+export interface EmailBulkSendResponse {
+  results: EmailBulkSendResultItem[];
+  summary: EmailBulkSendSummary;
 }
 
 export interface ResearchQueueEntry {
