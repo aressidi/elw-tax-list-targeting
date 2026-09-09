@@ -10,6 +10,7 @@ import {
   FileText,
   Send,
   Timer,
+  DollarSign,
 } from 'lucide-react';
 
 interface LayoutProps {
@@ -24,6 +25,7 @@ const primaryNavItems = [
   { path: '/email-campaigns', label: 'Email Campaigns', icon: Send },
   { path: '/email-queue', label: 'Email Queue', icon: Timer },
   { path: '/responses', label: 'Responses', icon: Inbox },
+  { path: '/reports', label: 'Budget & Reports', icon: DollarSign },
   { path: '/settings', label: 'Settings', icon: SettingsIcon },
 ];
 

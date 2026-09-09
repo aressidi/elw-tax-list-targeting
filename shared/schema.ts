@@ -253,6 +253,13 @@ export const listRequests = pgTable('list_requests', {
   rawListStatus: text('raw_list_status'),
   latestEventAt: timestamp('latest_event_at', { withTimezone: true }),
   paymentStatus: paymentStatusEnum('payment_status').default('not_required'),
+  // Budget tracking & reporting (card 15) — when/how/with-what-reference a
+  // quoted cost was actually paid. paymentStatus above stays the lifecycle
+  // flag; these are only meaningful once it's "requested" or later.
+  paymentDate: timestamp('payment_date', { withTimezone: true }),
+  paymentMethod: varchar('payment_method', { length: 50 }),
+  paymentReference: varchar('payment_reference', { length: 100 }),
+  invoiceNumber: varchar('invoice_number', { length: 100 }),
   foiaTemplateId: integer('foia_template_id').references(() => foiaTemplates.id, { onDelete: 'set null' }),
   emailSentAt: timestamp('email_sent_at', { withTimezone: true }),
   queuedAt: timestamp('queued_at', { withTimezone: true }),
@@ -275,6 +282,7 @@ export const listRequests = pgTable('list_requests', {
   statusIdx: index('list_requests_status_idx').on(table.requestStatus),
   listTypeIdx: index('list_requests_list_type_idx').on(table.listType),
   paymentStatusIdx: index('list_requests_payment_status_idx').on(table.paymentStatus),
+  paymentDateIdx: index('list_requests_payment_date_idx').on(table.paymentDate),
   templateIdx: index('list_requests_template_idx').on(table.foiaTemplateId),
   assignedIdx: index('list_requests_assigned_idx').on(table.assignedTo),
   createdAtIdx: index('list_requests_created_at_idx').on(table.createdAt),
