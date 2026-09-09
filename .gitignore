@@ -35,3 +35,6 @@ coverage/
 # Database
 *.sqlite
 *.sqlite3
+
+# Uploaded list files (card 11) — never checked into git
+uploads/

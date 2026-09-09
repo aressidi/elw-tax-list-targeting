@@ -1,4 +1,6 @@
 import { Router } from 'express';
+import fs from 'fs';
+import path from 'path';
 import { eq, and, like, ilike, desc, asc, sql, count, isNull, isNotNull, not, or, gte, lte, inArray } from 'drizzle-orm';
 import { db } from './db.js';
 import {
@@ -42,6 +44,22 @@ import {
 } from './services/queueService.js';
 import { pollInbox, getActiveInboxProvider } from './services/inboxService.js';
 import { applyReviewClassification } from './services/responseClassification.js';
+import {
+  MAX_FILE_SIZE_BYTES,
+  ensureUploadsDir,
+  sanitizeOriginalFilename,
+  detectFileType,
+  mimeTypeFor,
+  isAllowedExtension,
+  storedFilenameFor,
+  absoluteUploadPath,
+  relativeUploadPath,
+  absolutePathFromRelative,
+  readRawBody,
+  parseContentTypeBoundary,
+  parseMultipart,
+} from './services/fileStorage.js';
+import { buildPreview } from './services/filePreview.js';
 
 const router = Router();
 
@@ -1976,6 +1994,244 @@ router.patch('/list-requests/:id', async (req, res) => {
   } catch (error) {
     console.error('Error updating list request:', error);
     res.status(500).json(errorResponse('Failed to update list request'));
+  }
+});
+
+// ============================================================
+// File Upload & Storage (card 11) — original list files (CSV/PDF/Excel/TXT)
+// received from tax officials get saved under uploads/ with a
+// uuid-based filename (see fileStorage.storedFilenameFor), tracked as a
+// processed_lists row, and mirrored onto list_requests.listFileReceived /
+// fileLocation for cheap display without a join. Card 12's actual
+// list-import pipeline is expected to read these rows to find the raw
+// bytes to parse.
+// ============================================================
+
+// POST /api/list-requests/:id/upload - Upload a received list file
+router.post('/list-requests/:id/upload', async (req, res) => {
+  try {
+    const listRequestId = parseInt(req.params.id);
+    if (isNaN(listRequestId)) {
+      return res.status(400).json(errorResponse('Invalid list request ID', 400));
+    }
+
+    const listRequest = await db.query.listRequests.findFirst({ where: eq(listRequests.id, listRequestId) });
+    if (!listRequest) {
+      return res.status(404).json(errorResponse('List request not found', 404));
+    }
+
+    const boundary = parseContentTypeBoundary(req.headers['content-type']);
+    if (!boundary) {
+      return res.status(400).json(errorResponse('Expected multipart/form-data with a boundary', 400));
+    }
+
+    let body: Buffer;
+    try {
+      // A little slack over the limit so multipart framing overhead
+      // doesn't reject a file that is itself right at MAX_FILE_SIZE_BYTES.
+      body = await readRawBody(req, MAX_FILE_SIZE_BYTES + 64 * 1024);
+    } catch (err) {
+      if (err instanceof Error && err.message === 'PAYLOAD_TOO_LARGE') {
+        return res.status(413).json(errorResponse('File exceeds the 50MB upload limit', 413));
+      }
+      throw err;
+    }
+
+    const fields = parseMultipart(body, boundary);
+    const filePart = fields.find((f) => f.filename);
+    if (!filePart || !filePart.filename) {
+      return res.status(400).json(errorResponse('No file was included in the upload', 400));
+    }
+
+    if (filePart.filename.includes('\0') || filePart.filename.includes('..') || path.isAbsolute(filePart.filename)) {
+      return res.status(400).json(errorResponse('Invalid filename', 400));
+    }
+
+    if (filePart.data.length === 0) {
+      return res.status(400).json(errorResponse('Uploaded file is empty', 400));
+    }
+    if (filePart.data.length > MAX_FILE_SIZE_BYTES) {
+      return res.status(413).json(errorResponse('File exceeds the 50MB upload limit', 413));
+    }
+
+    if (!isAllowedExtension(filePart.filename)) {
+      return res
+        .status(400)
+        .json(errorResponse('Unsupported file type. Allowed: CSV, PDF, Excel (.xlsx/.xls), TXT', 400));
+    }
+
+    const originalFilename = sanitizeOriginalFilename(filePart.filename);
+    const fileType = detectFileType(filePart.filename)!;
+    const storedFilename = storedFilenameFor(listRequestId, filePart.filename);
+
+    ensureUploadsDir();
+    await fs.promises.writeFile(absoluteUploadPath(storedFilename), filePart.data);
+    const relPath = relativeUploadPath(storedFilename);
+
+    const [processedList] = await db
+      .insert(processedLists)
+      .values({
+        listRequestId,
+        originalFilename,
+        fileType,
+        filePath: relPath,
+        fileSizeBytes: filePart.data.length,
+        mimeType: filePart.contentType || mimeTypeFor(filePart.filename),
+        processedAt: new Date(),
+      })
+      .returning();
+
+    await db
+      .update(listRequests)
+      .set({ listFileReceived: true, fileLocation: relPath, updatedAt: new Date() })
+      .where(eq(listRequests.id, listRequestId));
+
+    await db.insert(listRequestEvents).values({
+      listRequestId,
+      eventType: 'file_received',
+      summary: `File uploaded: ${originalFilename}`,
+      metadata: { processedListId: processedList.id, fileType, fileSizeBytes: filePart.data.length },
+    });
+
+    res.status(201).json(successResponse(processedList));
+  } catch (error) {
+    console.error('Error uploading file:', error);
+    res.status(500).json(errorResponse('Failed to upload file'));
+  }
+});
+
+// GET /api/list-requests/:id/files - List uploaded files for a request
+router.get('/list-requests/:id/files', async (req, res) => {
+  try {
+    const listRequestId = parseInt(req.params.id);
+    if (isNaN(listRequestId)) {
+      return res.status(400).json(errorResponse('Invalid list request ID', 400));
+    }
+
+    const files = await db.query.processedLists.findMany({
+      where: eq(processedLists.listRequestId, listRequestId),
+      orderBy: desc(processedLists.processedAt),
+    });
+
+    res.json(successResponse(files));
+  } catch (error) {
+    console.error('Error fetching files:', error);
+    res.status(500).json(errorResponse('Failed to fetch files'));
+  }
+});
+
+// GET /api/processed-lists/:id/download - Stream the original file
+router.get('/processed-lists/:id/download', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json(errorResponse('Invalid file ID', 400));
+
+    const file = await db.query.processedLists.findFirst({ where: eq(processedLists.id, id) });
+    if (!file || !file.filePath) return res.status(404).json(errorResponse('File not found', 404));
+
+    let absPath: string;
+    try {
+      absPath = absolutePathFromRelative(file.filePath);
+    } catch {
+      return res.status(404).json(errorResponse('File not found', 404));
+    }
+    if (!fs.existsSync(absPath)) {
+      return res.status(404).json(errorResponse('File not found on disk', 404));
+    }
+
+    const filename = (file.originalFilename || 'download').replace(/"/g, '');
+    res.setHeader('Content-Type', file.mimeType || mimeTypeFor(filename));
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    fs.createReadStream(absPath).pipe(res);
+  } catch (error) {
+    console.error('Error downloading file:', error);
+    res.status(500).json(errorResponse('Failed to download file'));
+  }
+});
+
+// GET /api/processed-lists/:id/preview - Preview file contents
+router.get('/processed-lists/:id/preview', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json(errorResponse('Invalid file ID', 400));
+
+    const file = await db.query.processedLists.findFirst({ where: eq(processedLists.id, id) });
+    if (!file || !file.filePath) return res.status(404).json(errorResponse('File not found', 404));
+
+    let absPath: string;
+    try {
+      absPath = absolutePathFromRelative(file.filePath);
+    } catch {
+      return res.status(404).json(errorResponse('File not found', 404));
+    }
+    if (!fs.existsSync(absPath)) {
+      return res.status(404).json(errorResponse('File not found on disk', 404));
+    }
+
+    const buffer = await fs.promises.readFile(absPath);
+    const preview = buildPreview(buffer, file.fileType);
+
+    res.json(
+      successResponse({
+        file: {
+          id: file.id,
+          originalFilename: file.originalFilename,
+          fileType: file.fileType,
+          fileSizeBytes: file.fileSizeBytes,
+        },
+        preview,
+      })
+    );
+  } catch (error) {
+    console.error('Error previewing file:', error);
+    res.status(500).json(errorResponse('Failed to preview file'));
+  }
+});
+
+// DELETE /api/processed-lists/:id - Remove an uploaded file
+router.delete('/processed-lists/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json(errorResponse('Invalid file ID', 400));
+
+    const file = await db.query.processedLists.findFirst({ where: eq(processedLists.id, id) });
+    if (!file) return res.status(404).json(errorResponse('File not found', 404));
+
+    if (file.filePath) {
+      try {
+        await fs.promises.unlink(absolutePathFromRelative(file.filePath));
+      } catch (err: any) {
+        if (err?.code !== 'ENOENT') console.error('Error removing file from disk:', err);
+      }
+    }
+
+    await db.delete(processedLists).where(eq(processedLists.id, id));
+
+    const remaining = await db.query.processedLists.findMany({
+      where: eq(processedLists.listRequestId, file.listRequestId),
+      orderBy: desc(processedLists.processedAt),
+    });
+
+    await db
+      .update(listRequests)
+      .set({
+        listFileReceived: remaining.length > 0,
+        fileLocation: remaining[0]?.filePath ?? null,
+        updatedAt: new Date(),
+      })
+      .where(eq(listRequests.id, file.listRequestId));
+
+    await db.insert(listRequestEvents).values({
+      listRequestId: file.listRequestId,
+      eventType: 'other',
+      summary: `File removed: ${file.originalFilename || 'unnamed file'}`,
+      metadata: { processedListId: file.id },
+    });
+
+    res.json(successResponse({ deleted: true }));
+  } catch (error) {
+    console.error('Error deleting file:', error);
+    res.status(500).json(errorResponse('Failed to delete file'));
   }
 });
 

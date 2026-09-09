@@ -414,3 +414,58 @@ export interface ResearchQueueEntry {
     errorMessage: string | null;
   } | null;
 }
+
+// ====================
+// File Upload & Storage (card 11)
+// ====================
+
+export type UploadFileType = 'csv' | 'pdf' | 'excel' | 'txt' | 'other';
+
+export interface ProcessedListFile {
+  id: number;
+  listRequestId: number;
+  originalFilename: string | null;
+  fileType: UploadFileType | null;
+  filePath: string | null;
+  fileSizeBytes: number | null;
+  mimeType: string | null;
+  rawDataStored: boolean | null;
+  recordCount: number | null;
+  mailingListCreated: boolean | null;
+  mailingListExportPath: string | null;
+  processedAt: string | null;
+  notes: string | null;
+}
+
+export interface FileTextPreview {
+  kind: 'text';
+  totalLines: number;
+  rows: string[][];
+  truncated: boolean;
+}
+
+export interface FilePdfPreview {
+  kind: 'pdf';
+  approxPageCount: number | null;
+  title: string | null;
+  author: string | null;
+  producer: string | null;
+  note: string;
+}
+
+export interface FileMetadataOnlyPreview {
+  kind: 'metadata';
+  note: string;
+}
+
+export type FilePreview = FileTextPreview | FilePdfPreview | FileMetadataOnlyPreview;
+
+export interface FilePreviewResponse {
+  file: {
+    id: number;
+    originalFilename: string | null;
+    fileType: UploadFileType | null;
+    fileSizeBytes: number | null;
+  };
+  preview: FilePreview;
+}

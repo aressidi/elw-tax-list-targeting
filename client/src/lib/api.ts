@@ -45,3 +45,50 @@ export async function apiSend<T>(
   });
   return handle<T>(res);
 }
+
+// Uses XMLHttpRequest rather than fetch so we can report upload progress —
+// fetch has no cross-browser-reliable way to observe request-body upload
+// progress, only response download progress.
+export function apiUpload<T>(
+  path: string,
+  file: File,
+  onProgress?: (percent: number) => void
+): { promise: Promise<Envelope<T>>; abort: () => void } {
+  const xhr = new XMLHttpRequest();
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const promise = new Promise<Envelope<T>>((resolve, reject) => {
+    xhr.open('POST', path);
+
+    if (onProgress) {
+      xhr.upload.addEventListener('progress', (event) => {
+        if (event.lengthComputable) {
+          onProgress(Math.round((event.loaded / event.total) * 100));
+        }
+      });
+    }
+
+    xhr.addEventListener('load', () => {
+      let json: Envelope<T>;
+      try {
+        json = JSON.parse(xhr.responseText);
+      } catch {
+        reject(new ApiError('Unexpected server response', xhr.status));
+        return;
+      }
+      if (xhr.status >= 200 && xhr.status < 300 && json.success) {
+        resolve(json);
+      } else {
+        reject(new ApiError(json.error || `Request failed with status ${xhr.status}`, xhr.status));
+      }
+    });
+
+    xhr.addEventListener('error', () => reject(new ApiError('Network error during upload', 0)));
+    xhr.addEventListener('abort', () => reject(new ApiError('Upload cancelled', 0)));
+
+    xhr.send(formData);
+  });
+
+  return { promise, abort: () => xhr.abort() };
+}
