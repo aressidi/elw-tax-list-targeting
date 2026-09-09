@@ -84,10 +84,17 @@ export interface ListRequest {
   costCurrency: string | null;
   costNotes: string | null;
   pricingBasis: string | null;
+  // Budget tracking & reporting (card 15)
+  paymentStatus: string | null;
+  paymentDate: string | null;
+  paymentMethod: string | null;
+  paymentReference: string | null;
+  invoiceNumber: string | null;
   responseSummary: string | null;
   assignedTo: string | null;
   foiaTemplateId: number | null;
   emailSentAt: string | null;
+  listFileReceived?: boolean;
   createdAt: string;
   updatedAt: string;
   prices: ListRequestPrice[];
@@ -672,4 +679,106 @@ export interface BulkStatusSummary {
 export interface BulkStatusResponse {
   results: BulkStatusResultItem[];
   summary: BulkStatusSummary;
+}
+
+// ====================
+// Budget Tracking & Reporting (card 15)
+// ====================
+
+export type PaymentStatus = 'not_required' | 'requested' | 'paid' | 'fulfilled';
+
+export interface PricingBasisBreakdownEntry {
+  basis: string;
+  count: number;
+  totalAmount: number;
+}
+
+export interface ListTypeBreakdown {
+  free: number;
+  paid: number;
+  not_available: number;
+  unknown: number;
+}
+
+export interface CostSummaryReport {
+  currency: string;
+  totalListCount: number;
+  totalSpending: number;
+  totalQuotesPending: number;
+  totalPaid: number;
+  totalFulfilled: number;
+  paidListCount: number;
+  fulfilledListCount: number;
+  pendingQuoteCount: number;
+  averageCostPerPaidList: number | null;
+  listTypeBreakdown: ListTypeBreakdown;
+  pricingBasisBreakdown: PricingBasisBreakdownEntry[];
+}
+
+export interface CostByStateEntry {
+  stateId: number;
+  stateAbbreviation: string;
+  stateName: string;
+  listCount: number;
+  totalSpend: number;
+  totalQuoted: number;
+  paidCount: number;
+}
+
+export interface CostByCountyEntry {
+  requestId: number;
+  countyId: number;
+  countyName: string;
+  stateAbbreviation: string;
+  stateName: string;
+  officialName: string;
+  requestStatus: string | null;
+  listType: string | null;
+  pricingBasis: string | null;
+  costAmount: number | null;
+  currency: string;
+  paymentStatus: PaymentStatus | null;
+  paymentDate: string | null;
+  paymentMethod: string | null;
+  invoiceNumber: string | null;
+  paymentReference: string | null;
+  listFileReceived: boolean;
+}
+
+export interface PendingPaymentEntry {
+  requestId: number;
+  countyId: number;
+  countyName: string;
+  stateAbbreviation: string;
+  officialName: string;
+  costAmount: number | null;
+  currency: string;
+  paymentStatus: PaymentStatus | null;
+  invoiceNumber: string | null;
+  requestedAt: string;
+  daysPending: number;
+}
+
+export interface PaidUnfulfilledEntry {
+  requestId: number;
+  countyId: number;
+  countyName: string;
+  stateAbbreviation: string;
+  officialName: string;
+  costAmount: number | null;
+  currency: string;
+  paymentDate: string | null;
+  daysSincePaid: number | null;
+  requestStatus: string | null;
+}
+
+export interface UpdatePaymentInput {
+  paymentStatus?: PaymentStatus;
+  costAmount?: number | null;
+  pricingBasis?: string | null;
+  paymentDate?: string | null;
+  paymentMethod?: string | null;
+  paymentReference?: string | null;
+  invoiceNumber?: string | null;
+  costNotes?: string | null;
 }

@@ -52,6 +52,15 @@ import {
   getPipelineStages,
 } from './services/pipelineService.js';
 import {
+  buildCostSummaryCsv,
+  getCostByCounty,
+  getCostByState,
+  getCostSummary,
+  getPaidUnfulfilled,
+  getPendingPayments,
+  updateListRequestPayment,
+} from './services/reportService.js';
+import {
   MAX_FILE_SIZE_BYTES,
   ensureUploadsDir,
   sanitizeOriginalFilename,
@@ -132,6 +141,21 @@ const REVIEW_CLASSIFICATIONS = [
   'declined',
 ] as const;
 type ReviewClassificationValue = (typeof REVIEW_CLASSIFICATIONS)[number];
+
+// Budget tracking & reporting (card 15)
+const PAYMENT_STATUSES = ['not_required', 'requested', 'paid', 'fulfilled'] as const;
+type PaymentStatusValue = (typeof PAYMENT_STATUSES)[number];
+
+const PRICE_BASES = ['flat_list', 'per_listing', 'per_page', 'per_record', 'hourly', 'unknown'] as const;
+type PriceBasisValue = (typeof PRICE_BASES)[number];
+
+function isPaymentStatus(value: unknown): value is PaymentStatusValue {
+  return typeof value === 'string' && (PAYMENT_STATUSES as readonly string[]).includes(value);
+}
+
+function isPriceBasis(value: unknown): value is PriceBasisValue {
+  return typeof value === 'string' && (PRICE_BASES as readonly string[]).includes(value);
+}
 
 // ============================================================
 // Helper Functions
@@ -2859,6 +2883,78 @@ router.patch('/list-requests/:id/classify', async (req, res) => {
   }
 });
 
+// PATCH /api/list-requests/:id/payment - Budget tracking & reporting (card
+// 15). Updates cost/payment lifecycle fields (amount, pricing basis,
+// payment status/date/method/reference/invoice number). A payment-status
+// change is recorded as a list_request_events row for audit history,
+// mirroring how pipeline/response-classification status changes are logged.
+router.patch('/list-requests/:id/payment', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json(errorResponse('Invalid list request ID', 400));
+
+    const { paymentStatus, costAmount, pricingBasis, paymentDate, paymentMethod, paymentReference, invoiceNumber, costNotes } =
+      req.body ?? {};
+
+    const update: Parameters<typeof updateListRequestPayment>[1] = {};
+
+    if (paymentStatus !== undefined) {
+      if (!isPaymentStatus(paymentStatus)) {
+        return res.status(400).json(errorResponse(`paymentStatus must be one of: ${PAYMENT_STATUSES.join(', ')}`, 400));
+      }
+      update.paymentStatus = paymentStatus;
+    }
+
+    if (costAmount !== undefined) {
+      if (costAmount === null || costAmount === '') {
+        update.costAmount = null;
+      } else {
+        const parsed = Number(costAmount);
+        if (isNaN(parsed) || parsed < 0) {
+          return res.status(400).json(errorResponse('costAmount must be a non-negative number', 400));
+        }
+        update.costAmount = parsed;
+      }
+    }
+
+    if (pricingBasis !== undefined) {
+      if (pricingBasis !== null && !isPriceBasis(pricingBasis)) {
+        return res.status(400).json(errorResponse(`pricingBasis must be one of: ${PRICE_BASES.join(', ')}`, 400));
+      }
+      update.pricingBasis = pricingBasis;
+    }
+
+    if (paymentDate !== undefined) {
+      if (paymentDate === null || paymentDate === '') {
+        update.paymentDate = null;
+      } else {
+        const parsed = new Date(paymentDate);
+        if (isNaN(parsed.getTime())) {
+          return res.status(400).json(errorResponse('paymentDate must be a valid date', 400));
+        }
+        update.paymentDate = parsed;
+      }
+    }
+
+    if (paymentMethod !== undefined) update.paymentMethod = cleanString(paymentMethod)?.slice(0, 50) ?? null;
+    if (paymentReference !== undefined) update.paymentReference = cleanString(paymentReference)?.slice(0, 100) ?? null;
+    if (invoiceNumber !== undefined) update.invoiceNumber = cleanString(invoiceNumber)?.slice(0, 100) ?? null;
+    if (costNotes !== undefined) update.costNotes = cleanString(costNotes);
+
+    if (Object.keys(update).length === 0) {
+      return res.status(400).json(errorResponse('No valid payment fields to update', 400));
+    }
+
+    const result = await updateListRequestPayment(id, update);
+    if (!result) return res.status(404).json(errorResponse('List request not found', 404));
+
+    res.json(successResponse(result));
+  } catch (error) {
+    console.error('Error updating list request payment:', error);
+    res.status(500).json(errorResponse('Failed to update list request payment'));
+  }
+});
+
 // ============================================================
 // Email Sending (card 07)
 //
@@ -3441,6 +3537,90 @@ router.post('/responses/:id/process', async (req, res) => {
   } catch (error) {
     console.error('Error processing response:', error);
     res.status(500).json(errorResponse('Failed to process response'));
+  }
+});
+
+// ============================================================
+// Budget Tracking & Reporting (card 15)
+//
+// Every report is a read-only aggregation over list_requests (see
+// server/services/reportService.ts) -- there is no separate budget table.
+// The payment lifecycle itself is edited through
+// PATCH /api/list-requests/:id/payment, defined above alongside the other
+// list-request mutation routes.
+// ============================================================
+
+// GET /api/reports/costs - High-level spending summary: totals, quotes
+// pending, paid/fulfilled, average cost per paid list, free/paid list
+// ratio, and a breakdown by pricing basis.
+router.get('/reports/costs', async (_req, res) => {
+  try {
+    const summary = await getCostSummary();
+    res.json(successResponse(summary));
+  } catch (error) {
+    console.error('Error fetching cost summary report:', error);
+    res.status(500).json(errorResponse('Failed to fetch cost summary report'));
+  }
+});
+
+// GET /api/reports/by-state - Spend, quotes, and list counts aggregated by state.
+router.get('/reports/by-state', async (_req, res) => {
+  try {
+    const rows = await getCostByState();
+    res.json(successResponse(rows));
+  } catch (error) {
+    console.error('Error fetching cost-by-state report:', error);
+    res.status(500).json(errorResponse('Failed to fetch cost-by-state report'));
+  }
+});
+
+// GET /api/reports/by-county - Detailed cost/payment record per list request.
+router.get('/reports/by-county', async (_req, res) => {
+  try {
+    const rows = await getCostByCounty();
+    res.json(successResponse(rows));
+  } catch (error) {
+    console.error('Error fetching cost-by-county report:', error);
+    res.status(500).json(errorResponse('Failed to fetch cost-by-county report'));
+  }
+});
+
+// GET /api/reports/pending-payments - Aging report of quotes/invoices
+// requested but not yet paid.
+router.get('/reports/pending-payments', async (_req, res) => {
+  try {
+    const rows = await getPendingPayments();
+    res.json(successResponse(rows));
+  } catch (error) {
+    console.error('Error fetching pending payments report:', error);
+    res.status(500).json(errorResponse('Failed to fetch pending payments report'));
+  }
+});
+
+// GET /api/reports/paid-unfulfilled - Requests marked paid whose file has
+// not yet been received.
+router.get('/reports/paid-unfulfilled', async (_req, res) => {
+  try {
+    const rows = await getPaidUnfulfilled();
+    res.json(successResponse(rows));
+  } catch (error) {
+    console.error('Error fetching paid-unfulfilled report:', error);
+    res.status(500).json(errorResponse('Failed to fetch paid-unfulfilled report'));
+  }
+});
+
+// GET /api/reports/export-csv - Download the full cost-by-county spending
+// summary as a CSV file.
+router.get('/reports/export-csv', async (_req, res) => {
+  try {
+    const rows = await getCostByCounty();
+    const csv = buildCostSummaryCsv(rows);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="budget-report-${new Date().toISOString().slice(0, 10)}.csv"`);
+    res.send(csv);
+  } catch (error) {
+    console.error('Error exporting budget report CSV:', error);
+    res.status(500).json(errorResponse('Failed to export budget report CSV'));
   }
 });
 

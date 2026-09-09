@@ -17,6 +17,7 @@ import NewCountyWithResearch from './pages/NewCountyWithResearch';
 import EmailCampaigns from './pages/EmailCampaigns';
 import EmailQueue from './pages/EmailQueue';
 import Responses from './pages/Responses';
+import Reports from './pages/Reports';
 import Settings from './pages/Settings';
 
 const queryClient = new QueryClient();
@@ -49,6 +50,7 @@ function App() {
             <Route path="/email-campaigns" component={EmailCampaigns} />
             <Route path="/email-queue" component={EmailQueue} />
             <Route path="/responses" component={Responses} />
+            <Route path="/reports" component={Reports} />
             <Route path="/settings" component={Settings} />
           </Layout>
         </Router>
