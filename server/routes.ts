@@ -14,6 +14,7 @@ import {
   listRequestStatusHistory,
   emailTracking,
   processedLists,
+  processedListRecords,
   countyResearchRuns,
   inboxItems,
 } from '../shared/schema.js';
@@ -60,6 +61,8 @@ import {
   parseMultipart,
 } from './services/fileStorage.js';
 import { buildPreview } from './services/filePreview.js';
+import { parseFileBuffer, buildMappedRecords, validateRecords } from './services/dataParser.js';
+import { STANDARD_FIELDS, autoMapFields, type StandardFieldId } from '../shared/dataFields.js';
 
 const router = Router();
 
@@ -2232,6 +2235,268 @@ router.delete('/processed-lists/:id', async (req, res) => {
   } catch (error) {
     console.error('Error deleting file:', error);
     res.status(500).json(errorResponse('Failed to delete file'));
+  }
+});
+
+// ============================================================
+// Data Parsing & Validation (card 12) — turns the raw bytes behind a
+// processed_lists row into headers/rows, suggests a standard-field
+// mapping, and (via /map-fields) persists individual records with
+// validation + duplicate detection to processed_list_records.
+// ============================================================
+
+const STANDARD_FIELD_IDS = new Set(STANDARD_FIELDS.map((f) => f.id));
+
+// POST /api/processed-lists/:id/parse - Parse the uploaded file and
+// auto-suggest a field mapping + validation summary over the full file.
+// Saves the auto-mapping as a starting point but does not persist
+// individual records (see /map-fields for that).
+router.post('/processed-lists/:id/parse', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json(errorResponse('Invalid file ID', 400));
+
+    const file = await db.query.processedLists.findFirst({ where: eq(processedLists.id, id) });
+    if (!file || !file.filePath) return res.status(404).json(errorResponse('File not found', 404));
+
+    let absPath: string;
+    try {
+      absPath = absolutePathFromRelative(file.filePath);
+    } catch {
+      return res.status(404).json(errorResponse('File not found', 404));
+    }
+    if (!fs.existsSync(absPath)) {
+      return res.status(404).json(errorResponse('File not found on disk', 404));
+    }
+
+    const buffer = await fs.promises.readFile(absPath);
+    const parsed = parseFileBuffer(buffer, file.fileType);
+
+    if (parsed.headers.length === 0) {
+      return res.json(
+        successResponse({
+          headers: [],
+          rowCount: 0,
+          mapping: null,
+          sampleRecords: [],
+          validationSummary: null,
+          sourceFormat: parsed.sourceFormat,
+          warnings: parsed.warnings,
+        })
+      );
+    }
+
+    const mapping = autoMapFields(parsed.headers);
+    const built = buildMappedRecords(parsed.headers, parsed.rows, mapping);
+    const { records, summary } = validateRecords(built);
+
+    await db
+      .update(processedLists)
+      .set({ fieldMapping: mapping, validationSummary: summary })
+      .where(eq(processedLists.id, id));
+
+    res.json(
+      successResponse({
+        headers: parsed.headers,
+        rowCount: parsed.rows.length,
+        mapping,
+        sampleRecords: records.slice(0, 20),
+        validationSummary: summary,
+        sourceFormat: parsed.sourceFormat,
+        warnings: parsed.warnings,
+      })
+    );
+  } catch (error) {
+    console.error('Error parsing file:', error);
+    res.status(500).json(errorResponse('Failed to parse file'));
+  }
+});
+
+// POST /api/processed-lists/:id/map-fields - Accept a (possibly edited)
+// field mapping, re-parse the file against it, and persist every record to
+// processed_list_records. Replaces any records from a previous mapping.
+router.post('/processed-lists/:id/map-fields', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json(errorResponse('Invalid file ID', 400));
+
+    const file = await db.query.processedLists.findFirst({ where: eq(processedLists.id, id) });
+    if (!file || !file.filePath) return res.status(404).json(errorResponse('File not found', 404));
+
+    const { mapping } = req.body ?? {};
+    if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping)) {
+      return res.status(400).json(errorResponse('mapping is required and must be an object', 400));
+    }
+    for (const key of Object.keys(mapping)) {
+      if (!STANDARD_FIELD_IDS.has(key as StandardFieldId)) {
+        return res.status(400).json(errorResponse(`Unknown standard field "${key}"`, 400));
+      }
+    }
+
+    let absPath: string;
+    try {
+      absPath = absolutePathFromRelative(file.filePath);
+    } catch {
+      return res.status(404).json(errorResponse('File not found', 404));
+    }
+    if (!fs.existsSync(absPath)) {
+      return res.status(404).json(errorResponse('File not found on disk', 404));
+    }
+
+    const buffer = await fs.promises.readFile(absPath);
+    const parsed = parseFileBuffer(buffer, file.fileType);
+    if (parsed.headers.length === 0) {
+      return res.status(400).json(errorResponse('This file has no parseable headers/rows to map', 400));
+    }
+
+    const normalizedMapping: Record<string, string | null> = {};
+    for (const field of STANDARD_FIELDS) {
+      const value = mapping[field.id];
+      if (value === null || value === undefined) {
+        normalizedMapping[field.id] = null;
+        continue;
+      }
+      if (typeof value !== 'string' || !parsed.headers.includes(value)) {
+        return res
+          .status(400)
+          .json(errorResponse(`mapping.${field.id} must reference a header from the parsed file`, 400));
+      }
+      normalizedMapping[field.id] = value;
+    }
+
+    const built = buildMappedRecords(parsed.headers, parsed.rows, normalizedMapping);
+    const { records, summary } = validateRecords(built);
+
+    await db.delete(processedListRecords).where(eq(processedListRecords.processedListId, id));
+
+    if (records.length > 0) {
+      await db.insert(processedListRecords).values(
+        records.map((r) => ({
+          processedListId: id,
+          rawData: r.rawData,
+          mappedData: r.mappedData,
+          isValid: r.isValid,
+          validationErrors: r.validationErrors,
+          isDuplicate: r.isDuplicate,
+        }))
+      );
+    }
+
+    const [updated] = await db
+      .update(processedLists)
+      .set({
+        fieldMapping: normalizedMapping,
+        validationSummary: summary,
+        recordCount: records.length,
+        rawDataStored: true,
+        processedAt: new Date(),
+      })
+      .where(eq(processedLists.id, id))
+      .returning();
+
+    await db
+      .update(listRequests)
+      .set({ dataProcessed: true, updatedAt: new Date() })
+      .where(eq(listRequests.id, file.listRequestId));
+
+    await db.insert(listRequestEvents).values({
+      listRequestId: file.listRequestId,
+      eventType: 'data_processed',
+      summary: `Parsed and mapped ${records.length} record${records.length === 1 ? '' : 's'} from ${file.originalFilename ?? 'file'}`,
+      metadata: { processedListId: id, validationSummary: summary },
+    });
+
+    res.json(successResponse({ processedList: updated, validationSummary: summary }));
+  } catch (error) {
+    console.error('Error mapping fields:', error);
+    res.status(500).json(errorResponse('Failed to map fields'));
+  }
+});
+
+// GET /api/processed-lists/:id/records - Paginated, searchable, filterable
+// view of persisted parsed records for a file.
+router.get('/processed-lists/:id/records', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json(errorResponse('Invalid file ID', 400));
+
+    const file = await db.query.processedLists.findFirst({ where: eq(processedLists.id, id) });
+    if (!file) return res.status(404).json(errorResponse('File not found', 404));
+
+    const { limit, offset, page } = getPagination(req);
+    const conditions = [eq(processedListRecords.processedListId, id)];
+
+    const statusFilter = typeof req.query.status === 'string' ? req.query.status : undefined;
+    if (statusFilter === 'valid') {
+      conditions.push(eq(processedListRecords.isValid, true), eq(processedListRecords.isDuplicate, false));
+    } else if (statusFilter === 'error') {
+      conditions.push(eq(processedListRecords.isValid, false));
+    } else if (statusFilter === 'duplicate') {
+      conditions.push(eq(processedListRecords.isDuplicate, true));
+    } else if (statusFilter && statusFilter !== 'all') {
+      return res.status(400).json(errorResponse('status must be one of: all, valid, error, duplicate', 400));
+    }
+
+    const search = cleanString(req.query.search);
+    if (search) {
+      conditions.push(sql`${processedListRecords.mappedData}::text ILIKE ${'%' + search + '%'}`);
+    }
+
+    const whereClause = and(...conditions);
+
+    const totalResult = await db.select({ count: count() }).from(processedListRecords).where(whereClause);
+    const total = totalResult[0]?.count || 0;
+
+    const rows = await db.query.processedListRecords.findMany({
+      where: whereClause,
+      orderBy: asc(processedListRecords.id),
+      limit,
+      offset,
+    });
+
+    res.json(successResponse(rows, { pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } }));
+  } catch (error) {
+    console.error('Error fetching parsed records:', error);
+    res.status(500).json(errorResponse('Failed to fetch parsed records'));
+  }
+});
+
+// GET /api/processed-lists/:id/mapping - Current (persisted) field mapping
+// plus freshly detected headers, for re-opening the mapping UI later.
+router.get('/processed-lists/:id/mapping', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json(errorResponse('Invalid file ID', 400));
+
+    const file = await db.query.processedLists.findFirst({ where: eq(processedLists.id, id) });
+    if (!file || !file.filePath) return res.status(404).json(errorResponse('File not found', 404));
+
+    let absPath: string;
+    try {
+      absPath = absolutePathFromRelative(file.filePath);
+    } catch {
+      return res.status(404).json(errorResponse('File not found', 404));
+    }
+    if (!fs.existsSync(absPath)) {
+      return res.status(404).json(errorResponse('File not found on disk', 404));
+    }
+
+    const buffer = await fs.promises.readFile(absPath);
+    const parsed = parseFileBuffer(buffer, file.fileType);
+
+    res.json(
+      successResponse({
+        headers: parsed.headers,
+        mapping: file.fieldMapping ?? null,
+        validationSummary: file.validationSummary ?? null,
+        recordCount: file.recordCount,
+        sourceFormat: parsed.sourceFormat,
+        warnings: parsed.warnings,
+      })
+    );
+  } catch (error) {
+    console.error('Error fetching field mapping:', error);
+    res.status(500).json(errorResponse('Failed to fetch field mapping'));
   }
 });
 
