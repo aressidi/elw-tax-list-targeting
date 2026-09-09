@@ -36,6 +36,13 @@
       "when": 1788953780412,
       "tag": "0004_mute_master_chief",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788954546031,
+      "tag": "0005_high_mattie_franklin",
+      "breakpoints": true
     }
   ]
 }
