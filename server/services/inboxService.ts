@@ -47,13 +47,12 @@ export interface RawInboxMessage {
 
 // ------------------------------------------------------------
 // Live path: shells out to the `gog` CLI, already authenticated for
-// alex@eastonlandworks.com. Flags follow gog's documented `gmail search`
+// alex@eastonlandworks.com. Per `gog gmail search --help`, the query is a
+// positional argument (Usage: gog gmail search <query> ... [flags]), not a
+// --query flag. Remaining flags follow gog's documented `gmail search`
 // interface (--json for structured output, --select to pick fields,
 // --gmail-no-send as a defense-in-depth belt so this read-only call can
-// never trigger a send even if misconfigured). UNVERIFIED against a live
-// `gog gmail search --help` — the sandbox this was written in could not
-// run that command (same limitation noted in emailService.ts for `gmail
-// send`). Confirm the flag names before relying on this path.
+// never trigger a send even if misconfigured).
 // ------------------------------------------------------------
 
 const GOG_SEARCH_QUERY = process.env.INBOX_SEARCH_QUERY || 'newer_than:7d in:inbox';
@@ -78,7 +77,6 @@ function fetchViaGog(): Promise<RawInboxMessage[]> {
       [
         'gmail',
         'search',
-        '--query',
         GOG_SEARCH_QUERY,
         '--json',
         '--select',
