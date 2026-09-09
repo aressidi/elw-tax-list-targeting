@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { eq, and, like, ilike, desc, asc, sql, count, isNull, not, or, gte, lte, inArray } from 'drizzle-orm';
+import { eq, and, like, ilike, desc, asc, sql, count, isNull, isNotNull, not, or, gte, lte, inArray } from 'drizzle-orm';
 import { db } from './db.js';
 import {
   states,
@@ -13,6 +13,7 @@ import {
   emailTracking,
   processedLists,
   countyResearchRuns,
+  inboxItems,
 } from '../shared/schema.js';
 import { triggerCountyResearch } from './services/research/researchService.js';
 import {
@@ -39,6 +40,7 @@ import {
   setPaused,
   updateDailyLimit,
 } from './services/queueService.js';
+import { pollInbox, getActiveInboxProvider } from './services/inboxService.js';
 
 const router = Router();
 
@@ -2240,6 +2242,232 @@ router.post('/email-queue/:id/cancel', async (req, res) => {
   } catch (error) {
     console.error('Error cancelling queue item:', error);
     res.status(500).json(errorResponse('Failed to cancel queue item'));
+  }
+});
+
+// ============================================================
+// Inbox Monitoring Routes (card 09)
+//
+// INBOX_PROVIDER gates the transport exactly like EMAIL_TRANSPORT does for
+// sending (see emailService.ts): unset or anything other than "gog" means
+// every "check now" here runs against the mock provider only. No route in
+// this section ever sends or replies to anything.
+// ============================================================
+
+const INBOX_ITEM_STATUSES = ['unprocessed', 'matched', 'unmatched', 'reviewed', 'attached'] as const;
+type InboxItemStatusValue = (typeof INBOX_ITEM_STATUSES)[number];
+
+const INBOX_CLASSIFICATIONS = [
+  'list_received',
+  'fee_quote',
+  'fee_paid',
+  'clarification',
+  'rejection',
+  'other',
+] as const;
+type InboxClassificationValue = (typeof INBOX_CLASSIFICATIONS)[number];
+
+function isInboxItemStatus(value: unknown): value is InboxItemStatusValue {
+  return typeof value === 'string' && (INBOX_ITEM_STATUSES as readonly string[]).includes(value);
+}
+
+function isInboxClassification(value: unknown): value is InboxClassificationValue {
+  return typeof value === 'string' && (INBOX_CLASSIFICATIONS as readonly string[]).includes(value);
+}
+
+// POST /api/inbox/check - Trigger a poll now. In mock mode (default) this
+// generates sample replies at most once a minute (or immediately if
+// INBOX_MOCK_NEW=1 is set); in live mode (INBOX_PROVIDER=gog) it searches
+// Gmail read-only via the gog CLI. Returns the newly-created items only.
+router.post('/inbox/check', async (_req, res) => {
+  try {
+    const result = await pollInbox();
+    res.json(successResponse(result));
+  } catch (error) {
+    console.error('Error polling inbox:', error);
+    res.status(500).json(errorResponse('Failed to poll inbox'));
+  }
+});
+
+// GET /api/inbox/unprocessed - Items still awaiting human review, i.e.
+// anything not yet explicitly marked "reviewed".
+router.get('/inbox/unprocessed', async (req, res) => {
+  try {
+    const { limit, offset, page } = getPagination(req);
+
+    const whereClause = not(eq(inboxItems.status, 'reviewed'));
+    const totalResult = await db.select({ count: count() }).from(inboxItems).where(whereClause);
+    const total = totalResult[0]?.count || 0;
+
+    const results = await db.query.inboxItems.findMany({
+      where: whereClause,
+      with: {
+        listRequest: {
+          with: { taxOfficial: { with: { county: { with: { state: true } } } } },
+        },
+      },
+      orderBy: desc(inboxItems.receivedAt),
+      limit,
+      offset,
+    });
+
+    res.json(successResponse(results, {
+      pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
+    }));
+  } catch (error) {
+    console.error('Error fetching unprocessed inbox items:', error);
+    res.status(500).json(errorResponse('Failed to fetch unprocessed inbox items'));
+  }
+});
+
+// GET /api/inbox/items - All inbox items with optional filters, newest first.
+router.get('/inbox/items', async (req, res) => {
+  try {
+    const { limit, offset, page } = getPagination(req);
+    const { status, classification, listRequestId, matched } = req.query;
+
+    const conditions = [];
+    if (status !== undefined) {
+      if (!isInboxItemStatus(status)) {
+        return res.status(400).json(errorResponse('Invalid status filter', 400));
+      }
+      conditions.push(eq(inboxItems.status, status));
+    }
+    if (classification !== undefined) {
+      if (!isInboxClassification(classification)) {
+        return res.status(400).json(errorResponse('Invalid classification filter', 400));
+      }
+      conditions.push(eq(inboxItems.classification, classification));
+    }
+    if (listRequestId !== undefined) {
+      const parsed = parseInt(listRequestId as string);
+      if (isNaN(parsed)) return res.status(400).json(errorResponse('Invalid listRequestId filter', 400));
+      conditions.push(eq(inboxItems.listRequestId, parsed));
+    }
+    if (matched === 'true') conditions.push(isNotNull(inboxItems.listRequestId));
+    if (matched === 'false') conditions.push(isNull(inboxItems.listRequestId));
+
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
+    const totalResult = await db.select({ count: count() }).from(inboxItems).where(whereClause);
+    const total = totalResult[0]?.count || 0;
+
+    const results = await db.query.inboxItems.findMany({
+      where: whereClause,
+      with: {
+        listRequest: {
+          with: { taxOfficial: { with: { county: { with: { state: true } } } } },
+        },
+      },
+      orderBy: desc(inboxItems.receivedAt),
+      limit,
+      offset,
+    });
+
+    res.json(successResponse(results, {
+      pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
+    }));
+  } catch (error) {
+    console.error('Error fetching inbox items:', error);
+    res.status(500).json(errorResponse('Failed to fetch inbox items'));
+  }
+});
+
+// GET /api/inbox/settings - Surfaces which provider is active so the UI
+// can show a clear "mock" vs "live Gmail" indicator.
+router.get('/inbox/settings', async (_req, res) => {
+  res.json(successResponse({ provider: getActiveInboxProvider() }));
+});
+
+// POST /api/inbox/:id/classify - One-click manual (re)classification.
+// Only updates the label; it does not retroactively touch the linked
+// list_request (that already happened, if at all, using the rule-engine's
+// classification at ingest time).
+router.post('/inbox/:id/classify', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json(errorResponse('Invalid inbox item ID', 400));
+
+    const { classification } = req.body ?? {};
+    if (!isInboxClassification(classification)) {
+      return res.status(400).json(errorResponse(`classification must be one of: ${INBOX_CLASSIFICATIONS.join(', ')}`, 400));
+    }
+
+    const result = await db
+      .update(inboxItems)
+      .set({ classification })
+      .where(eq(inboxItems.id, id))
+      .returning();
+
+    if (result.length === 0) return res.status(404).json(errorResponse('Inbox item not found', 404));
+
+    res.json(successResponse(result[0]));
+  } catch (error) {
+    console.error('Error classifying inbox item:', error);
+    res.status(500).json(errorResponse('Failed to classify inbox item'));
+  }
+});
+
+// POST /api/inbox/:id/link - Manually link or relink an item to a list
+// request (or unlink with listRequestId: null). Manual links are always
+// full confidence since a human made the call.
+router.post('/inbox/:id/link', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json(errorResponse('Invalid inbox item ID', 400));
+
+    const existing = await db.query.inboxItems.findFirst({ where: eq(inboxItems.id, id) });
+    if (!existing) return res.status(404).json(errorResponse('Inbox item not found', 404));
+
+    const { listRequestId } = req.body ?? {};
+
+    if (listRequestId === null) {
+      const result = await db
+        .update(inboxItems)
+        .set({ listRequestId: null, matchMethod: null, matchConfidence: 0, status: 'unmatched' })
+        .where(eq(inboxItems.id, id))
+        .returning();
+      return res.json(successResponse(result[0]));
+    }
+
+    const parsedId = parseInt(listRequestId);
+    if (isNaN(parsedId)) return res.status(400).json(errorResponse('listRequestId is required', 400));
+
+    const request = await db.query.listRequests.findFirst({ where: eq(listRequests.id, parsedId) });
+    if (!request) return res.status(400).json(errorResponse('List request not found', 400));
+
+    const result = await db
+      .update(inboxItems)
+      .set({ listRequestId: parsedId, matchMethod: 'manual', matchConfidence: 100, status: 'matched' })
+      .where(eq(inboxItems.id, id))
+      .returning();
+
+    res.json(successResponse(result[0]));
+  } catch (error) {
+    console.error('Error linking inbox item:', error);
+    res.status(500).json(errorResponse('Failed to link inbox item'));
+  }
+});
+
+// POST /api/inbox/:id/status - Manual status override, e.g. marking an
+// item "reviewed" once a human has looked at it.
+router.post('/inbox/:id/status', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json(errorResponse('Invalid inbox item ID', 400));
+
+    const { status } = req.body ?? {};
+    if (!isInboxItemStatus(status)) {
+      return res.status(400).json(errorResponse(`status must be one of: ${INBOX_ITEM_STATUSES.join(', ')}`, 400));
+    }
+
+    const result = await db.update(inboxItems).set({ status }).where(eq(inboxItems.id, id)).returning();
+    if (result.length === 0) return res.status(404).json(errorResponse('Inbox item not found', 404));
+
+    res.json(successResponse(result[0]));
+  } catch (error) {
+    console.error('Error updating inbox item status:', error);
+    res.status(500).json(errorResponse('Failed to update inbox item status'));
   }
 });
 
