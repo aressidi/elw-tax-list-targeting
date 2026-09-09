@@ -335,6 +335,16 @@ export type InboxClassification =
   | 'rejection'
   | 'other';
 
+// Human review classification (card 10) — distinct from InboxClassification
+// above, which is the rule engine's guess at ingest time.
+export type ReviewClassification =
+  | 'list_provided'
+  | 'requires_payment'
+  | 'requires_form'
+  | 'not_available'
+  | 'needs_clarification'
+  | 'declined';
+
 export interface InboxAttachmentMeta {
   filename: string;
   sizeBytes: number;
@@ -355,6 +365,12 @@ export interface InboxItem {
   classification: InboxClassification | null;
   status: InboxItemStatus;
   attachmentMetadata: InboxAttachmentMeta[] | null;
+  reviewClassification: ReviewClassification | null;
+  reviewNotes: string | null;
+  reviewCostAmount: string | null;
+  reviewCostCurrency: string | null;
+  reviewFormUrl: string | null;
+  reviewedAt: string | null;
   createdAt: string;
   listRequest: {
     id: number;

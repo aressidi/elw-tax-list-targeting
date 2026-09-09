@@ -20,7 +20,8 @@ export const requestStatusEnum = pgEnum('request_status', [
   'requires_payment',
   'requires_form',
   'not_available',
-  'declined'
+  'declined',
+  'needs_clarification'
 ]);
 
 export const listTypeEnum = pgEnum('list_type', ['free', 'paid', 'not_available', 'unknown']);
@@ -118,6 +119,19 @@ export const inboxClassificationEnum = pgEnum('inbox_classification', [
   'clarification',
   'rejection',
   'other'
+]);
+
+// Human review classification (card 10) — a separate vocabulary from the
+// rule-based inboxClassificationEnum above. That enum is the machine's
+// best guess at ingest time; this one is what a person decides once they
+// actually read the message, and is what drives the list_request update.
+export const reviewClassificationEnum = pgEnum('review_classification', [
+  'list_provided',
+  'requires_payment',
+  'requires_form',
+  'not_available',
+  'needs_clarification',
+  'declined',
 ]);
 
 // ====================
@@ -341,6 +355,15 @@ export const inboxItems = pgTable('inbox_items', {
   classification: inboxClassificationEnum('classification'),
   status: inboxItemStatusEnum('status').default('unprocessed').notNull(),
   attachmentMetadata: jsonb('attachment_metadata'),
+  // Human review fields (card 10). Populated once someone works the item
+  // through the classification review flow; independent of `classification`
+  // above, which stays whatever the rule engine guessed at ingest time.
+  reviewClassification: reviewClassificationEnum('review_classification'),
+  reviewNotes: text('review_notes'),
+  reviewCostAmount: decimal('review_cost_amount', { precision: 10, scale: 2 }),
+  reviewCostCurrency: varchar('review_cost_currency', { length: 3 }),
+  reviewFormUrl: varchar('review_form_url', { length: 500 }),
+  reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 }, (table) => ({
   gmailMessageIdIdx: uniqueIndex('inbox_items_gmail_message_id_idx').on(table.gmailMessageId),
@@ -348,6 +371,7 @@ export const inboxItems = pgTable('inbox_items', {
   listRequestIdx: index('inbox_items_list_request_idx').on(table.listRequestId),
   statusIdx: index('inbox_items_status_idx').on(table.status),
   classificationIdx: index('inbox_items_classification_idx').on(table.classification),
+  reviewClassificationIdx: index('inbox_items_review_classification_idx').on(table.reviewClassification),
 }));
 
 // ====================
@@ -588,6 +612,7 @@ export type NewInboxItem = typeof inboxItems.$inferInsert;
 export type InboxItemStatus = (typeof inboxItemStatusEnum.enumValues)[number];
 export type InboxMatchMethod = (typeof inboxMatchMethodEnum.enumValues)[number];
 export type InboxClassification = (typeof inboxClassificationEnum.enumValues)[number];
+export type ReviewClassification = (typeof reviewClassificationEnum.enumValues)[number];
 
 export type ProcessedList = typeof processedLists.$inferSelect;
 export type NewProcessedList = typeof processedLists.$inferInsert;
