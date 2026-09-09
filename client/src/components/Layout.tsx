@@ -28,7 +28,7 @@ const primaryNavItems = [
 const secondaryNavItems = [
   { path: '/tax-officials', label: 'Tax Officials', icon: Users },
   { path: '/list-requests', label: 'List Requests', icon: FileText },
-  { path: '/foia-templates', label: 'FOIA Templates', icon: Mail },
+  { path: '/templates', label: 'FOIA Templates', icon: Mail },
 ];
 
 function isActivePath(location: string, path: string): boolean {

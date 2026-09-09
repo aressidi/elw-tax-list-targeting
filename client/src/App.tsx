@@ -10,7 +10,8 @@ import CountyDetail from './pages/CountyDetail';
 import Contacts from './pages/Contacts';
 import TaxOfficials from './pages/TaxOfficials';
 import ListRequests from './pages/ListRequests';
-import FoiaTemplates from './pages/FoiaTemplates';
+import Templates from './pages/Templates';
+import TemplateEditor from './pages/TemplateEditor';
 import ResearchQueue from './pages/ResearchQueue';
 import NewCountyWithResearch from './pages/NewCountyWithResearch';
 import EmailCampaigns from './pages/EmailCampaigns';
@@ -34,7 +35,12 @@ function App() {
             <Route path="/contacts" component={Contacts} />
             <Route path="/tax-officials" component={TaxOfficials} />
             <Route path="/list-requests" component={ListRequests} />
-            <Route path="/foia-templates" component={FoiaTemplates} />
+            <Route path="/templates" component={Templates} />
+            <Route path="/templates/new" component={TemplateEditor} />
+            <Route path="/templates/:id/edit" component={TemplateEditor} />
+            <Route path="/foia-templates">
+              <Redirect to="/templates" />
+            </Route>
             <Route path="/research" component={ResearchQueue} />
             <Route path="/research-queue">
               <Redirect to="/research" />
