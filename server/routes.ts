@@ -28,6 +28,17 @@ import {
   sendListRequestEmail,
   sendListRequestEmailsBulk,
 } from './services/emailService.js';
+import {
+  cancelQueueItem,
+  enqueueListRequestEmail,
+  enqueueListRequestEmailsBulk,
+  getOrCreateSettings,
+  getQueueStatus,
+  isValidDailyLimit,
+  listQueueItems,
+  setPaused,
+  updateDailyLimit,
+} from './services/queueService.js';
 
 const router = Router();
 
@@ -51,6 +62,7 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MAX_BULK_RESEARCH_COUNTIES = 25;
 const MAX_AI_IMPORT_CONTACTS = 20;
 const MAX_BULK_SEND_REQUESTS = 50;
+const MAX_BULK_ENQUEUE_REQUESTS = 50;
 
 const REQUEST_STATUSES = [
   'not_started',
@@ -2057,6 +2069,177 @@ router.post('/list-requests/bulk-send', async (req, res) => {
   } catch (error) {
     console.error('Error processing bulk email send:', error);
     res.status(500).json(errorResponse('Failed to process bulk send'));
+  }
+});
+
+// ============================================================
+// Email Queue & Throttle (card 08)
+//
+// enqueue/bulk-enqueue add items to the email_queue table instead of
+// sending immediately; the in-process scheduler in queueService.ts picks
+// them up (respecting the daily limit + paused flag) and sends through the
+// exact same emailService.sendListRequestEmail path as manual sends, so
+// the dry-run/gog transport gate is identical either way.
+// ============================================================
+
+// POST /api/list-requests/:id/enqueue - Add a single request to the send
+// queue. Body: { sendAt?: ISO string }. Omitting sendAt means "as soon as
+// the processor next runs and the daily budget allows"; passing sendAt
+// means "not before that time".
+router.post('/list-requests/:id/enqueue', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) {
+      return res.status(400).json(errorResponse('Invalid list request ID', 400));
+    }
+
+    const sendAt = typeof req.body?.sendAt === 'string' ? req.body.sendAt : undefined;
+    const result = await enqueueListRequestEmail(id, sendAt);
+
+    if (result.outcome === 'failed' || result.outcome === 'skipped') {
+      return res.status(result.statusCode).json(errorResponse(result.error || 'Failed to enqueue email', result.statusCode));
+    }
+
+    res.json(successResponse(result));
+  } catch (error) {
+    console.error('Error enqueueing list request email:', error);
+    res.status(500).json(errorResponse('Failed to enqueue email'));
+  }
+});
+
+// POST /api/list-requests/bulk-enqueue - Add several requests to the send
+// queue at once. Body: { requestIds: number[], sendAt?: ISO string }.
+// Mirrors the bulk-send endpoint's per-item result shape; one item failing
+// to enqueue never blocks the rest.
+router.post('/list-requests/bulk-enqueue', async (req, res) => {
+  try {
+    const { requestIds, sendAt } = req.body ?? {};
+
+    if (!Array.isArray(requestIds) || requestIds.length === 0) {
+      return res.status(400).json(errorResponse('requestIds must be a non-empty array', 400));
+    }
+    if (requestIds.length > MAX_BULK_ENQUEUE_REQUESTS) {
+      return res.status(400).json(errorResponse(`Cannot enqueue more than ${MAX_BULK_ENQUEUE_REQUESTS} requests at once`, 400));
+    }
+
+    const parsedIds: number[] = [];
+    for (const raw of requestIds) {
+      const parsed = parseInt(raw);
+      if (isNaN(parsed)) {
+        return res.status(400).json(errorResponse('requestIds must contain valid numeric IDs', 400));
+      }
+      parsedIds.push(parsed);
+    }
+
+    const parsedSendAt = typeof sendAt === 'string' ? sendAt : undefined;
+    const results = await enqueueListRequestEmailsBulk(parsedIds, parsedSendAt);
+
+    const summary = {
+      total: results.length,
+      queued: results.filter((r) => r.outcome === 'queued').length,
+      skipped: results.filter((r) => r.outcome === 'skipped').length,
+      failed: results.filter((r) => r.outcome === 'failed').length,
+    };
+
+    res.json(successResponse({ results, summary }));
+  } catch (error) {
+    console.error('Error processing bulk enqueue:', error);
+    res.status(500).json(errorResponse('Failed to process bulk enqueue'));
+  }
+});
+
+// GET /api/email-queue - List active (queued/sending) queue items with
+// enough list-request/county/contact detail for the dashboard. Pass
+// ?all=true to include sent/failed/cancelled history as well.
+router.get('/email-queue', async (req, res) => {
+  try {
+    const includeAll = req.query.all === 'true';
+    const items = await listQueueItems(includeAll);
+    res.json(successResponse(items));
+  } catch (error) {
+    console.error('Error fetching email queue:', error);
+    res.status(500).json(errorResponse('Failed to fetch email queue'));
+  }
+});
+
+// GET /api/email-queue/status - Throttle + queue stats for the dashboard.
+router.get('/email-queue/status', async (_req, res) => {
+  try {
+    const status = await getQueueStatus();
+    res.json(successResponse(status));
+  } catch (error) {
+    console.error('Error fetching email queue status:', error);
+    res.status(500).json(errorResponse('Failed to fetch email queue status'));
+  }
+});
+
+// POST /api/email-queue/pause - Stop the processor from sending. Queued
+// items are untouched and will resume being picked up once unpaused.
+router.post('/email-queue/pause', async (_req, res) => {
+  try {
+    const settings = await setPaused(true);
+    res.json(successResponse(settings));
+  } catch (error) {
+    console.error('Error pausing email queue:', error);
+    res.status(500).json(errorResponse('Failed to pause email queue'));
+  }
+});
+
+// POST /api/email-queue/resume
+router.post('/email-queue/resume', async (_req, res) => {
+  try {
+    const settings = await setPaused(false);
+    res.json(successResponse(settings));
+  } catch (error) {
+    console.error('Error resuming email queue:', error);
+    res.status(500).json(errorResponse('Failed to resume email queue'));
+  }
+});
+
+// PATCH /api/email-queue/settings - Body: { dailyLimit: number (20-50) }.
+router.patch('/email-queue/settings', async (req, res) => {
+  try {
+    const { dailyLimit } = req.body ?? {};
+    if (!isValidDailyLimit(dailyLimit)) {
+      return res.status(400).json(errorResponse('dailyLimit must be an integer between 20 and 50', 400));
+    }
+    const settings = await updateDailyLimit(dailyLimit);
+    res.json(successResponse(settings));
+  } catch (error) {
+    console.error('Error updating email queue settings:', error);
+    res.status(500).json(errorResponse('Failed to update email queue settings'));
+  }
+});
+
+// GET /api/email-queue/settings
+router.get('/email-queue/settings', async (_req, res) => {
+  try {
+    const settings = await getOrCreateSettings();
+    res.json(successResponse(settings));
+  } catch (error) {
+    console.error('Error fetching email queue settings:', error);
+    res.status(500).json(errorResponse('Failed to fetch email queue settings'));
+  }
+});
+
+// POST /api/email-queue/:id/cancel - Dequeue an item. Only items still in
+// 'queued' status can be cancelled; anything already claimed by the
+// processor ('sending') or resolved ('sent'/'failed'/'cancelled') is left
+// alone.
+router.post('/email-queue/:id/cancel', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) {
+      return res.status(400).json(errorResponse('Invalid queue item ID', 400));
+    }
+    const result = await cancelQueueItem(id);
+    if (!result.ok) {
+      return res.status(result.statusCode).json(errorResponse(result.error || 'Failed to cancel queue item', result.statusCode));
+    }
+    res.json(successResponse({ id, cancelled: true }));
+  } catch (error) {
+    console.error('Error cancelling queue item:', error);
+    res.status(500).json(errorResponse('Failed to cancel queue item'));
   }
 });
 

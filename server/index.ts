@@ -5,6 +5,7 @@ import { eq } from 'drizzle-orm';
 import routes from './routes.js';
 import { db } from './db.js';
 import { foiaTemplates } from '../shared/schema.js';
+import { startQueueProcessor } from './services/queueService.js';
 
 dotenv.config();
 
@@ -108,6 +109,10 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
 
 ensureDefaultTemplate().catch((error) => {
   console.error('Failed to ensure default FOIA template:', error);
+});
+
+startQueueProcessor().catch((error) => {
+  console.error('Failed to start email queue processor:', error);
 });
 
 app.listen(PORT, () => {
