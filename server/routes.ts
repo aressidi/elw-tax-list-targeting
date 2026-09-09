@@ -22,6 +22,12 @@ import {
   DEFAULT_SAMPLE_DATA,
   type TemplateSampleData,
 } from '../shared/templateVariables.js';
+import {
+  getActiveTransport,
+  prepareListRequestEmail,
+  sendListRequestEmail,
+  sendListRequestEmailsBulk,
+} from './services/emailService.js';
 
 const router = Router();
 
@@ -44,6 +50,22 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const MAX_BULK_RESEARCH_COUNTIES = 25;
 const MAX_AI_IMPORT_CONTACTS = 20;
+const MAX_BULK_SEND_REQUESTS = 50;
+
+const REQUEST_STATUSES = [
+  'not_started',
+  'research_needed',
+  'ready_to_email',
+  'email_sent',
+  'awaiting_response',
+  'response_received',
+  'list_provided',
+  'requires_payment',
+  'requires_form',
+  'not_available',
+  'declined',
+] as const;
+type RequestStatus = (typeof REQUEST_STATUSES)[number];
 
 // ============================================================
 // Helper Functions
@@ -74,6 +96,10 @@ function isResearchStatus(value: unknown): value is ResearchStatus {
 
 function isConfidenceLevel(value: unknown): value is (typeof CONFIDENCE_LEVELS)[number] {
   return typeof value === 'string' && (CONFIDENCE_LEVELS as readonly string[]).includes(value);
+}
+
+function isRequestStatus(value: unknown): value is RequestStatus {
+  return typeof value === 'string' && (REQUEST_STATUSES as readonly string[]).includes(value);
 }
 
 function isValidUrl(value: string): boolean {
@@ -1921,6 +1947,116 @@ router.patch('/list-requests/:id', async (req, res) => {
   } catch (error) {
     console.error('Error updating list request:', error);
     res.status(500).json(errorResponse('Failed to update list request'));
+  }
+});
+
+// ============================================================
+// Email Sending (card 07)
+//
+// Dry-run is the default transport (see server/services/emailService.ts);
+// EMAIL_TRANSPORT=gog is the only way to reach a real Gmail send, and that
+// env var is itself the human sign-off gate — nothing here flips it on
+// automatically. Every response and tracking row labels which transport
+// was actually used.
+// ============================================================
+
+// POST /api/list-requests/:id/send-email - Render + send (or dry-run) the
+// FOIA email for this request to the county's primary contact. Pass
+// { dryRun: true } to only render and return the preview with no side
+// effects (no tracking row, no status change). Refuses to re-send an
+// already-sent request unless ?force=true or { force: true } is set.
+router.post('/list-requests/:id/send-email', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) {
+      return res.status(400).json(errorResponse('Invalid list request ID', 400));
+    }
+
+    if (req.body?.dryRun === true) {
+      const prepared = await prepareListRequestEmail(id);
+      if (!prepared.ok) {
+        return res.status(prepared.status).json(errorResponse(prepared.error, prepared.status));
+      }
+      return res.json(
+        successResponse({
+          listRequestId: id,
+          recipientEmail: prepared.recipientEmail,
+          subject: prepared.subject,
+          body: prepared.body,
+          transport: getActiveTransport(),
+          preview: true,
+        })
+      );
+    }
+
+    const force = req.query.force === 'true' || req.body?.force === true;
+    const result = await sendListRequestEmail(id, { force });
+
+    if (result.outcome === 'failed' || result.outcome === 'skipped') {
+      return res.status(result.statusCode).json(errorResponse(result.error || 'Failed to send email', result.statusCode));
+    }
+
+    res.json(successResponse(result));
+  } catch (error) {
+    console.error('Error sending list request email:', error);
+    res.status(500).json(errorResponse('Failed to send email'));
+  }
+});
+
+// POST /api/list-requests/bulk-send - Send (or dry-run) emails for several
+// requests at once. Accepts either { requestIds: number[] } or
+// { status: RequestStatus } to select every request currently in that
+// status (e.g. "ready_to_email"). Processes sequentially; one failure never
+// aborts the rest. Returns a per-item result plus a summary count.
+router.post('/list-requests/bulk-send', async (req, res) => {
+  try {
+    const { requestIds, status, force } = req.body ?? {};
+
+    let parsedIds: number[];
+
+    if (Array.isArray(requestIds) && requestIds.length > 0) {
+      parsedIds = [];
+      for (const raw of requestIds) {
+        const parsed = parseInt(raw);
+        if (isNaN(parsed)) {
+          return res.status(400).json(errorResponse('requestIds must contain valid numeric IDs', 400));
+        }
+        parsedIds.push(parsed);
+      }
+    } else if (typeof status === 'string') {
+      if (!isRequestStatus(status)) {
+        return res.status(400).json(errorResponse('Invalid status filter', 400));
+      }
+      const rows = await db.query.listRequests.findMany({
+        where: eq(listRequests.requestStatus, status),
+        limit: MAX_BULK_SEND_REQUESTS,
+      });
+      parsedIds = rows.map((r) => r.id);
+      if (parsedIds.length === 0) {
+        return res.status(400).json(errorResponse('No list requests match the given status filter', 400));
+      }
+    } else {
+      return res.status(400).json(errorResponse('Provide requestIds (non-empty array) or a status filter', 400));
+    }
+
+    if (parsedIds.length > MAX_BULK_SEND_REQUESTS) {
+      return res.status(400).json(errorResponse(`Cannot send more than ${MAX_BULK_SEND_REQUESTS} requests at once`, 400));
+    }
+
+    const results = await sendListRequestEmailsBulk(parsedIds, { force: force === true });
+
+    const summary = {
+      total: results.length,
+      sent: results.filter((r) => r.outcome === 'sent').length,
+      skipped: results.filter((r) => r.outcome === 'skipped').length,
+      failed: results.filter((r) => r.outcome === 'failed').length,
+      transport: getActiveTransport(),
+    };
+
+    res.json(successResponse({ results, summary }));
+  } catch (error) {
+    console.error('Error processing bulk email send:', error);
+    res.status(500).json(errorResponse('Failed to process bulk send'));
   }
 });
 

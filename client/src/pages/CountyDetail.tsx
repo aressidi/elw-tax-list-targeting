@@ -11,6 +11,7 @@ import {
   Mail,
   Phone,
   Plus,
+  Send,
   ShieldCheck,
   Sparkles,
   Star,
@@ -28,6 +29,7 @@ import ConfidenceBadge from '../components/ConfidenceBadge';
 import Modal from '../components/Modal';
 import ConfirmDialog from '../components/ConfirmDialog';
 import ContactForm, { type ContactFormValues } from '../components/ContactForm';
+import SendEmailDialog from '../components/SendEmailDialog';
 import { useToast } from '../components/Toast';
 
 function formatDateTime(value: string | null | undefined): string | null {
@@ -75,6 +77,7 @@ export default function CountyDetail() {
   const [deletingContact, setDeletingContact] = useState<TaxOfficial | null>(null);
   const [confirmDeleteCounty, setConfirmDeleteCounty] = useState(false);
   const [showResearch, setShowResearch] = useState(false);
+  const [sendingRequest, setSendingRequest] = useState<ListRequest | null>(null);
 
   const { data: county, isLoading, isError, refetch } = useQuery({
     queryKey: ['county', countyId],
@@ -251,6 +254,7 @@ export default function CountyDetail() {
   }, [county]);
 
   const primaryContact = county?.taxOfficials.find((o) => o.isPrimary) ?? county?.taxOfficials[0];
+  const hasPrimaryEmail = !!primaryContact?.emailAddress;
 
   if (isLoading) return <LoadingState label="Loading county..." />;
   if (isError || !county) {
@@ -553,9 +557,26 @@ export default function CountyDetail() {
                 {request.responseSummary && (
                   <p className="text-sm text-gray-600 mt-2">{request.responseSummary}</p>
                 )}
-                <p className="text-xs text-gray-400 mt-2">
-                  Created {new Date(request.createdAt).toLocaleDateString()}
-                </p>
+                <div className="flex items-center justify-between flex-wrap gap-2 mt-3 pt-3 border-t">
+                  <p className="text-xs text-gray-400">
+                    Created {new Date(request.createdAt).toLocaleDateString()}
+                    {request.emailSentAt && (
+                      <span className="text-green-600">
+                        {' '}
+                        &middot; Email sent {new Date(request.emailSentAt).toLocaleString()}
+                      </span>
+                    )}
+                  </p>
+                  <button
+                    onClick={() => setSendingRequest(request)}
+                    disabled={!hasPrimaryEmail}
+                    title={!hasPrimaryEmail ? 'This county has no primary contact with an email address' : undefined}
+                    className="inline-flex items-center gap-1.5 text-sm font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    {request.emailSentAt ? 'Resend Email' : 'Send Email'}
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -642,6 +663,16 @@ export default function CountyDetail() {
         <ResearchReviewPanel
           county={{ id: county.id, name: county.name, state: county.state }}
           onClose={() => setShowResearch(false)}
+        />
+      )}
+
+      {sendingRequest && (
+        <SendEmailDialog
+          listRequestId={sendingRequest.id}
+          recipientLabel={primaryContact?.fullName ?? 'Primary contact'}
+          alreadySent={!!sendingRequest.emailSentAt}
+          onClose={() => setSendingRequest(null)}
+          onSent={invalidateCounty}
         />
       )}
     </div>
