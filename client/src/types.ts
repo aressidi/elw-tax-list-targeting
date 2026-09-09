@@ -592,3 +592,84 @@ export interface GenerateExportResponse {
   downloadUrl: string;
   processedList?: ProcessedListFile;
 }
+
+// ====================
+// Dashboard & Pipeline View (card 14)
+// ====================
+
+export type PipelineStageKey =
+  | 'not_started'
+  | 'researching'
+  | 'ready_to_email'
+  | 'email_sent'
+  | 'awaiting_response'
+  | 'response_received'
+  | 'list_provided'
+  | 'data_processed';
+
+export interface PipelineCard {
+  stage: PipelineStageKey;
+  requestId: number | null;
+  countyId: number;
+  countyName: string;
+  stateAbbreviation: string;
+  stateName: string;
+  contact: { name: string; email: string | null } | null;
+  requestStatus: string | null;
+  listType: string | null;
+  costAmount: string | null;
+  costCurrency: string | null;
+  priority: TargetPriority | null;
+  emailSentAt: string | null;
+  responseReceivedAt: string | null;
+  updatedAt: string;
+  daysInStage: number;
+  daysSinceSent: number | null;
+  dataProcessed: boolean;
+  listFileReceived: boolean;
+  hasActiveResearchRun: boolean;
+}
+
+export interface PipelineStageGroup {
+  key: PipelineStageKey;
+  label: string;
+  count: number;
+  cards: PipelineCard[];
+}
+
+export interface PipelineResponse {
+  stages: PipelineStageGroup[];
+}
+
+export interface DashboardMetrics {
+  totalCounties: number;
+  totalListRequests: number;
+  totalSent: number;
+  responseRate: number;
+  avgResponseTimeDays: number | null;
+  activeRequests: number;
+  processedLists: number;
+  cost: {
+    currency: string;
+    totalQuoted: number;
+    totalPaid: number;
+    totalAll: number;
+  };
+}
+
+export interface BulkStatusResultItem {
+  id: number;
+  success: boolean;
+  error?: string;
+}
+
+export interface BulkStatusSummary {
+  total: number;
+  updated: number;
+  failed: number;
+}
+
+export interface BulkStatusResponse {
+  results: BulkStatusResultItem[];
+  summary: BulkStatusSummary;
+}

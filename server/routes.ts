@@ -47,6 +47,11 @@ import {
 import { pollInbox, getActiveInboxProvider } from './services/inboxService.js';
 import { applyReviewClassification } from './services/responseClassification.js';
 import {
+  applyPipelineStatusChange,
+  getDashboardMetrics,
+  getPipelineStages,
+} from './services/pipelineService.js';
+import {
   MAX_FILE_SIZE_BYTES,
   ensureUploadsDir,
   sanitizeOriginalFilename,
@@ -100,6 +105,7 @@ const MAX_BULK_RESEARCH_COUNTIES = 25;
 const MAX_AI_IMPORT_CONTACTS = 20;
 const MAX_BULK_SEND_REQUESTS = 50;
 const MAX_BULK_ENQUEUE_REQUESTS = 50;
+const MAX_BULK_STATUS_REQUESTS = 50;
 
 const REQUEST_STATUSES = [
   'not_started',
@@ -113,6 +119,7 @@ const REQUEST_STATUSES = [
   'requires_form',
   'not_available',
   'declined',
+  'needs_clarification',
 ] as const;
 type RequestStatus = (typeof REQUEST_STATUSES)[number];
 
@@ -159,6 +166,13 @@ function isConfidenceLevel(value: unknown): value is (typeof CONFIDENCE_LEVELS)[
 
 function isRequestStatus(value: unknown): value is RequestStatus {
   return typeof value === 'string' && (REQUEST_STATUSES as readonly string[]).includes(value);
+}
+
+// Pipeline status accepts every request_status value plus the
+// "data_processed" pseudo-status (card 14) -- the latter has no enum value
+// of its own since it's really the independent dataProcessed flag.
+function isPipelineStatusInput(value: unknown): value is RequestStatus | 'data_processed' {
+  return value === 'data_processed' || isRequestStatus(value);
 }
 
 function isReviewClassification(value: unknown): value is ReviewClassificationValue {
@@ -2014,6 +2028,96 @@ router.patch('/list-requests/:id', async (req, res) => {
 });
 
 // ============================================================
+// Pipeline status transitions (card 14) — unlike the generic PATCH above,
+// these always go through applyPipelineStatusChange so a status change
+// leaves the same status-history/event audit trail the dashboard's kanban
+// board and the response-classification review flow both rely on.
+// ============================================================
+
+// PATCH /api/list-requests/:id/status - Move a single request to a new
+// pipeline status. Body: { status: RequestStatus | 'data_processed', reason?: string }.
+router.patch('/list-requests/:id/status', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) {
+      return res.status(400).json(errorResponse('Invalid list request ID', 400));
+    }
+
+    const { status, reason } = req.body ?? {};
+    if (!isPipelineStatusInput(status)) {
+      return res.status(400).json(
+        errorResponse(`status must be one of: ${REQUEST_STATUSES.join(', ')}, data_processed`, 400)
+      );
+    }
+
+    const result = await applyPipelineStatusChange(id, { status, reason: cleanString(reason) });
+    if (!result) {
+      return res.status(404).json(errorResponse('List request not found', 404));
+    }
+
+    res.json(successResponse(result.listRequest));
+  } catch (error) {
+    console.error('Error updating list request status:', error);
+    res.status(500).json(errorResponse('Failed to update list request status'));
+  }
+});
+
+// POST /api/list-requests/bulk-status - Move several requests to a new
+// pipeline status at once. Body: { requestIds: number[], status: RequestStatus | 'data_processed', reason?: string }.
+// One item failing (e.g. an id that no longer exists) never blocks the rest.
+router.post('/list-requests/bulk-status', async (req, res) => {
+  try {
+    const { requestIds, status, reason } = req.body ?? {};
+
+    if (!isPipelineStatusInput(status)) {
+      return res.status(400).json(
+        errorResponse(`status must be one of: ${REQUEST_STATUSES.join(', ')}, data_processed`, 400)
+      );
+    }
+    if (!Array.isArray(requestIds) || requestIds.length === 0) {
+      return res.status(400).json(errorResponse('requestIds must be a non-empty array', 400));
+    }
+    if (requestIds.length > MAX_BULK_STATUS_REQUESTS) {
+      return res.status(400).json(errorResponse(`Cannot update more than ${MAX_BULK_STATUS_REQUESTS} requests at once`, 400));
+    }
+
+    const parsedIds: number[] = [];
+    for (const raw of requestIds) {
+      const parsed = parseInt(raw);
+      if (isNaN(parsed)) {
+        return res.status(400).json(errorResponse('requestIds must contain valid numeric IDs', 400));
+      }
+      parsedIds.push(parsed);
+    }
+
+    const cleanedReason = cleanString(reason);
+    const results = await Promise.all(
+      parsedIds.map(async (requestId) => {
+        try {
+          const result = await applyPipelineStatusChange(requestId, { status, reason: cleanedReason });
+          if (!result) return { id: requestId, success: false, error: 'List request not found' };
+          return { id: requestId, success: true };
+        } catch (error) {
+          console.error(`Error updating status for list request ${requestId}:`, error);
+          return { id: requestId, success: false, error: 'Failed to update status' };
+        }
+      })
+    );
+
+    const summary = {
+      total: results.length,
+      updated: results.filter((r) => r.success).length,
+      failed: results.filter((r) => !r.success).length,
+    };
+
+    res.json(successResponse({ results, summary }));
+  } catch (error) {
+    console.error('Error processing bulk status update:', error);
+    res.status(500).json(errorResponse('Failed to process bulk status update'));
+  }
+});
+
+// ============================================================
 // File Upload & Storage (card 11) — original list files (CSV/PDF/Excel/TXT)
 // received from tax officials get saved under uploads/ with a
 // uuid-based filename (see fileStorage.storedFilenameFor), tracked as a
@@ -3376,6 +3480,36 @@ router.get('/dashboard/stats', async (_req, res) => {
   } catch (error) {
     console.error('Error fetching dashboard stats:', error);
     res.status(500).json(errorResponse('Failed to fetch dashboard stats'));
+  }
+});
+
+// ============================================================
+// Dashboard & Pipeline View (card 14)
+// ============================================================
+
+// GET /api/dashboard/pipeline - Kanban board data: every list_request (plus
+// a virtual card per pre-request county) grouped into the eight pipeline
+// stages. See server/services/pipelineService.ts for the stage derivation.
+router.get('/dashboard/pipeline', async (_req, res) => {
+  try {
+    const stages = await getPipelineStages();
+    res.json(successResponse({ stages }));
+  } catch (error) {
+    console.error('Error fetching dashboard pipeline:', error);
+    res.status(500).json(errorResponse('Failed to fetch dashboard pipeline'));
+  }
+});
+
+// GET /api/dashboard/metrics - Summary widgets for the dashboard header
+// (counties, response rate, avg response time, active/processed counts,
+// cost quoted vs paid).
+router.get('/dashboard/metrics', async (_req, res) => {
+  try {
+    const metrics = await getDashboardMetrics();
+    res.json(successResponse(metrics));
+  } catch (error) {
+    console.error('Error fetching dashboard metrics:', error);
+    res.status(500).json(errorResponse('Failed to fetch dashboard metrics'));
   }
 });
 
