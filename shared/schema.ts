@@ -432,6 +432,27 @@ export const processedListRecords = pgTable('processed_list_records', {
 }));
 
 // ====================
+// Mailing List Exports Table (card 13) — one row per generated ELW export
+// CSV for a processed_lists file. The file itself lives under exports/
+// (gitignored, like uploads/); this table is the export history plus the
+// pointer back to those bytes (see server/services/exportService.ts).
+// ====================
+export const mailingListExports = pgTable('mailing_list_exports', {
+  id: serial('id').primaryKey(),
+  processedListId: integer('processed_list_id').notNull().references(() => processedLists.id, { onDelete: 'cascade' }),
+  filename: varchar('filename', { length: 255 }).notNull(),
+  exportPath: varchar('export_path', { length: 500 }).notNull(),
+  recordCount: integer('record_count').notNull(),
+  exportFormat: varchar('export_format', { length: 50 }).default('elw_csv').notNull(),
+  includeDuplicates: boolean('include_duplicates').default(false).notNull(),
+  validOnly: boolean('valid_only').default(true).notNull(),
+  exportedAt: timestamp('exported_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  processedListIdx: index('mailing_list_exports_processed_list_idx').on(table.processedListId),
+  exportedAtIdx: index('mailing_list_exports_exported_at_idx').on(table.exportedAt),
+}));
+
+// ====================
 // List Request Prices Table
 // ====================
 export const listRequestPrices = pgTable('list_request_prices', {
@@ -572,11 +593,19 @@ export const processedListsRelations = relations(processedLists, ({ one, many })
     references: [listRequests.id],
   }),
   records: many(processedListRecords),
+  exports: many(mailingListExports),
 }));
 
 export const processedListRecordsRelations = relations(processedListRecords, ({ one }) => ({
   processedList: one(processedLists, {
     fields: [processedListRecords.processedListId],
+    references: [processedLists.id],
+  }),
+}));
+
+export const mailingListExportsRelations = relations(mailingListExports, ({ one }) => ({
+  processedList: one(processedLists, {
+    fields: [mailingListExports.processedListId],
     references: [processedLists.id],
   }),
 }));
@@ -618,6 +647,7 @@ export const insertEmailQueueSettingsSchema = createInsertSchema(emailQueueSetti
 export const insertInboxItemSchema = createInsertSchema(inboxItems);
 export const insertProcessedListSchema = createInsertSchema(processedLists);
 export const insertProcessedListRecordSchema = createInsertSchema(processedListRecords);
+export const insertMailingListExportSchema = createInsertSchema(mailingListExports);
 export const insertListRequestPriceSchema = createInsertSchema(listRequestPrices);
 export const insertListRequestEventSchema = createInsertSchema(listRequestEvents);
 export const insertListRequestStatusHistorySchema = createInsertSchema(listRequestStatusHistory);
@@ -665,6 +695,9 @@ export type NewProcessedList = typeof processedLists.$inferInsert;
 
 export type ProcessedListRecord = typeof processedListRecords.$inferSelect;
 export type NewProcessedListRecord = typeof processedListRecords.$inferInsert;
+
+export type MailingListExport = typeof mailingListExports.$inferSelect;
+export type NewMailingListExport = typeof mailingListExports.$inferInsert;
 
 export type ListRequestPrice = typeof listRequestPrices.$inferSelect;
 export type NewListRequestPrice = typeof listRequestPrices.$inferInsert;

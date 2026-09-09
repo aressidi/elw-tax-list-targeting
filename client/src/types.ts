@@ -536,3 +536,59 @@ export interface ProcessedListRecord {
   isDuplicate: boolean;
   createdAt: string;
 }
+
+// ====================
+// Mailing List Export & ELW Integration (card 13)
+// ====================
+
+export type ElwExportColumn =
+  | 'first_name'
+  | 'last_name'
+  | 'company_name'
+  | 'owner_raw'
+  | 'mailing_street'
+  | 'mailing_city'
+  | 'mailing_state'
+  | 'mailing_zip'
+  | 'property_apn'
+  | 'property_street'
+  | 'property_city'
+  | 'property_state'
+  | 'property_zip'
+  | 'tax_amount_due'
+  | 'county_name'
+  | 'state_name'
+  | 'source_label';
+
+export type ElwExportRow = Record<ElwExportColumn, string>;
+
+export interface ExportOptions {
+  includeDuplicates: boolean;
+  validOnly: boolean;
+}
+
+export interface ExportPreviewResponse {
+  columns: readonly ElwExportColumn[];
+  rows: ElwExportRow[];
+  previewCount: number;
+  totalMatching: number;
+}
+
+export interface MailingListExport {
+  id: number;
+  processedListId: number;
+  filename: string;
+  exportPath: string;
+  recordCount: number;
+  exportFormat: string;
+  includeDuplicates: boolean;
+  validOnly: boolean;
+  exportedAt: string;
+}
+
+export interface GenerateExportResponse {
+  export: MailingListExport;
+  recordCount: number;
+  downloadUrl: string;
+  processedList?: ProcessedListFile;
+}

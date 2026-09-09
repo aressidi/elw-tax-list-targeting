@@ -38,3 +38,6 @@ coverage/
 
 # Uploaded list files (card 11) — never checked into git
 uploads/
+
+# Generated mailing list export CSVs (card 13) — never checked into git
+exports/

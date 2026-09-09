@@ -15,6 +15,7 @@ import {
   emailTracking,
   processedLists,
   processedListRecords,
+  mailingListExports,
   countyResearchRuns,
   inboxItems,
 } from '../shared/schema.js';
@@ -63,6 +64,18 @@ import {
 import { buildPreview } from './services/filePreview.js';
 import { parseFileBuffer, buildMappedRecords, validateRecords } from './services/dataParser.js';
 import { STANDARD_FIELDS, autoMapFields, type StandardFieldId } from '../shared/dataFields.js';
+import {
+  DEFAULT_EXPORT_OPTIONS,
+  ELW_EXPORT_COLUMNS,
+  absoluteExportPath,
+  buildElwExportRow,
+  countExportRecords,
+  fetchExportRecords,
+  generateExport,
+  listExportHistory,
+  resolveExportContext,
+  type ExportOptions,
+} from './services/exportService.js';
 
 const router = Router();
 
@@ -2208,6 +2221,15 @@ router.delete('/processed-lists/:id', async (req, res) => {
       }
     }
 
+    const exports = await listExportHistory(id);
+    for (const exportRow of exports) {
+      try {
+        await fs.promises.unlink(absoluteExportPath(exportRow.exportPath));
+      } catch (err: any) {
+        if (err?.code !== 'ENOENT') console.error('Error removing export file from disk:', err);
+      }
+    }
+
     await db.delete(processedLists).where(eq(processedLists.id, id));
 
     const remaining = await db.query.processedLists.findMany({
@@ -2497,6 +2519,211 @@ router.get('/processed-lists/:id/mapping', async (req, res) => {
   } catch (error) {
     console.error('Error fetching field mapping:', error);
     res.status(500).json(errorResponse('Failed to fetch field mapping'));
+  }
+});
+
+// ============================================================
+// Mailing List Export & ELW Integration (card 13) — turns the validated
+// processed_list_records for a file into the standard ELW mailing-list CSV
+// (see server/services/exportService.ts for parsing/formatting logic).
+// ============================================================
+
+function parseExportOptions(source: Record<string, unknown>): ExportOptions {
+  const includeDuplicates =
+    source.includeDuplicates === true || source.includeDuplicates === 'true'
+      ? true
+      : source.includeDuplicates === false || source.includeDuplicates === 'false'
+        ? false
+        : DEFAULT_EXPORT_OPTIONS.includeDuplicates;
+  const validOnly =
+    source.validOnly === true || source.validOnly === 'true'
+      ? true
+      : source.validOnly === false || source.validOnly === 'false'
+        ? false
+        : DEFAULT_EXPORT_OPTIONS.validOnly;
+  return { includeDuplicates, validOnly };
+}
+
+// POST /api/processed-lists/:id/export - Generate an ELW-format export CSV
+// for a processed list's records.
+router.post('/processed-lists/:id/export', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json(errorResponse('Invalid file ID', 400));
+
+    const file = await db.query.processedLists.findFirst({ where: eq(processedLists.id, id) });
+    if (!file) return res.status(404).json(errorResponse('File not found', 404));
+    if (!file.recordCount) {
+      return res.status(400).json(errorResponse('This file has no processed records to export — map fields first', 400));
+    }
+
+    const options = parseExportOptions(req.body ?? {});
+    const result = await generateExport(id, options);
+    if ('error' in result) return res.status(400).json(errorResponse(result.error, 400));
+
+    await db.insert(listRequestEvents).values({
+      listRequestId: file.listRequestId,
+      eventType: 'other',
+      summary: `Mailing list export generated: ${result.recordCount} record${result.recordCount === 1 ? '' : 's'}`,
+      metadata: { processedListId: id, exportId: result.export.id, recordCount: result.recordCount },
+    });
+
+    const updated = await db.query.processedLists.findFirst({ where: eq(processedLists.id, id) });
+
+    res.status(201).json(
+      successResponse({
+        export: result.export,
+        recordCount: result.recordCount,
+        downloadUrl: result.downloadUrl,
+        processedList: updated,
+      })
+    );
+  } catch (error) {
+    console.error('Error generating mailing list export:', error);
+    res.status(500).json(errorResponse('Failed to generate mailing list export'));
+  }
+});
+
+// GET /api/processed-lists/:id/export-preview - First 20 records formatted
+// in the ELW export shape, without writing a file.
+router.get('/processed-lists/:id/export-preview', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json(errorResponse('Invalid file ID', 400));
+
+    const context = await resolveExportContext(id);
+    if (!context) return res.status(404).json(errorResponse('File not found', 404));
+
+    const options = parseExportOptions(req.query as Record<string, unknown>);
+    const [records, totalMatching] = await Promise.all([
+      fetchExportRecords(id, options, 20),
+      countExportRecords(id, options),
+    ]);
+    const rows = records.map((r) => buildElwExportRow(r, context));
+
+    res.json(successResponse({ columns: ELW_EXPORT_COLUMNS, rows, previewCount: rows.length, totalMatching }));
+  } catch (error) {
+    console.error('Error building export preview:', error);
+    res.status(500).json(errorResponse('Failed to build export preview'));
+  }
+});
+
+// GET /api/processed-lists/:id/export-history - Past exports for a file.
+router.get('/processed-lists/:id/export-history', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json(errorResponse('Invalid file ID', 400));
+
+    const file = await db.query.processedLists.findFirst({ where: eq(processedLists.id, id) });
+    if (!file) return res.status(404).json(errorResponse('File not found', 404));
+
+    const history = await listExportHistory(id);
+    res.json(successResponse(history));
+  } catch (error) {
+    console.error('Error fetching export history:', error);
+    res.status(500).json(errorResponse('Failed to fetch export history'));
+  }
+});
+
+// GET /api/processed-lists/:id/export-download - Stream the most recently
+// generated export CSV for a processed list, without needing its export ID
+// (see GET /api/exports/:id/download for downloading a specific past export).
+router.get('/processed-lists/:id/export-download', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json(errorResponse('Invalid file ID', 400));
+
+    const [latest] = await listExportHistory(id);
+    if (!latest) return res.status(404).json(errorResponse('No export has been generated for this file yet', 404));
+
+    let absPath: string;
+    try {
+      absPath = absoluteExportPath(latest.exportPath);
+    } catch {
+      return res.status(404).json(errorResponse('Export file not found', 404));
+    }
+    if (!fs.existsSync(absPath)) {
+      return res.status(404).json(errorResponse('Export file not found on disk', 404));
+    }
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${latest.filename}"`);
+    fs.createReadStream(absPath).pipe(res);
+  } catch (error) {
+    console.error('Error downloading latest export:', error);
+    res.status(500).json(errorResponse('Failed to download export'));
+  }
+});
+
+// GET /api/exports/:id/download - Stream a previously generated export CSV.
+router.get('/exports/:id/download', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json(errorResponse('Invalid export ID', 400));
+
+    const exportRow = await db.query.mailingListExports.findFirst({ where: eq(mailingListExports.id, id) });
+    if (!exportRow) return res.status(404).json(errorResponse('Export not found', 404));
+
+    let absPath: string;
+    try {
+      absPath = absoluteExportPath(exportRow.exportPath);
+    } catch {
+      return res.status(404).json(errorResponse('Export file not found', 404));
+    }
+    if (!fs.existsSync(absPath)) {
+      return res.status(404).json(errorResponse('Export file not found on disk', 404));
+    }
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${exportRow.filename}"`);
+    fs.createReadStream(absPath).pipe(res);
+  } catch (error) {
+    console.error('Error downloading export:', error);
+    res.status(500).json(errorResponse('Failed to download export'));
+  }
+});
+
+// POST /api/export/to-mailing-list - Integration entry point for pushing a
+// processed list directly into ELW's mailing list format. There is no live
+// ELW API available in this codebase (no documented endpoint/credentials),
+// so this produces the same standardized export CSV as
+// POST /processed-lists/:id/export — the ELW-facing "sync" is the
+// resulting file, not a network call.
+router.post('/export/to-mailing-list', async (req, res) => {
+  try {
+    const { processedListId } = req.body ?? {};
+    const id = parseInt(processedListId);
+    if (isNaN(id)) return res.status(400).json(errorResponse('processedListId is required', 400));
+
+    const file = await db.query.processedLists.findFirst({ where: eq(processedLists.id, id) });
+    if (!file) return res.status(404).json(errorResponse('File not found', 404));
+    if (!file.recordCount) {
+      return res.status(400).json(errorResponse('This file has no processed records to export — map fields first', 400));
+    }
+
+    const options = parseExportOptions(req.body ?? {});
+    const result = await generateExport(id, options);
+    if ('error' in result) return res.status(400).json(errorResponse(result.error, 400));
+
+    await db.insert(listRequestEvents).values({
+      listRequestId: file.listRequestId,
+      eventType: 'other',
+      summary: `Exported to ELW mailing list format: ${result.recordCount} record${result.recordCount === 1 ? '' : 's'}`,
+      metadata: { processedListId: id, exportId: result.export.id, recordCount: result.recordCount, integration: 'elw' },
+    });
+
+    res.status(201).json(
+      successResponse({
+        outcome: 'exported',
+        format: 'elw_csv',
+        export: result.export,
+        recordCount: result.recordCount,
+        downloadUrl: result.downloadUrl,
+      })
+    );
+  } catch (error) {
+    console.error('Error exporting to ELW mailing list format:', error);
+    res.status(500).json(errorResponse('Failed to export to ELW mailing list format'));
   }
 });
 
