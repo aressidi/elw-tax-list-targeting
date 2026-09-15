@@ -1023,8 +1023,14 @@ router.post('/research/bulk', async (req, res) => {
     if (action !== 'research' && action !== 'skip') {
       return res.status(400).json(errorResponse('action must be "research" or "skip"', 400));
     }
-    if (provider !== undefined && provider !== null && provider !== 'mock' && provider !== 'http') {
-      return res.status(400).json(errorResponse('provider must be "mock" or "http"', 400));
+    if (
+      provider !== undefined &&
+      provider !== null &&
+      provider !== 'mock' &&
+      provider !== 'http' &&
+      provider !== 'ai'
+    ) {
+      return res.status(400).json(errorResponse('provider must be "mock", "http", or "ai"', 400));
     }
 
     const parsedIds: number[] = [];

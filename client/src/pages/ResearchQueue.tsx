@@ -56,13 +56,21 @@ export default function ResearchQueue() {
 
   const triggerResearch = useMutation({
     mutationFn: (countyId: number) =>
-      apiSend(`/api/counties/${countyId}/research`, 'POST'),
+      apiSend<{ status: string; errorMessage: string | null }>(`/api/counties/${countyId}/research`, 'POST'),
     onMutate: (countyId) => setPendingCountyId(countyId),
-    onSuccess: (_result, countyId) => {
+    onSuccess: (result, countyId) => {
       invalidateQueue();
       const entry = queue?.find((c) => c.id === countyId);
       if (entry) setReviewingCounty(entry);
-      toast.showSuccess('Research complete. Opening review...');
+      // The server records a provider timeout/failure as a normal (HTTP 200)
+      // outcome rather than an error response — it's a legitimate, retryable
+      // research result, not a server fault. Reflect that in the toast instead
+      // of always claiming success.
+      if (result.data?.status === 'failed') {
+        toast.showError(result.data.errorMessage || 'Research failed. Review the error and try again.');
+      } else {
+        toast.showSuccess('Research complete. Opening review...');
+      }
     },
     onError: (error: unknown) => {
       toast.showError(error instanceof ApiError ? error.message : 'Failed to trigger research.');
@@ -75,7 +83,6 @@ export default function ResearchQueue() {
       apiSend('/api/research/bulk', 'POST', {
         countyIds: payload.countyIds,
         action: payload.action,
-        provider: payload.action === 'research' ? 'mock' : undefined,
       }),
     onSuccess: (_result, payload) => {
       invalidateQueue();
@@ -253,6 +260,7 @@ export default function ResearchQueue() {
                       <button
                         onClick={() => triggerResearch.mutate(entry.id)}
                         disabled={pendingCountyId === entry.id}
+                        title={pendingCountyId === entry.id ? 'AI research with web search can take up to a couple minutes.' : undefined}
                         className="inline-flex items-center gap-1 text-sm font-medium text-blue-600 hover:text-blue-800 disabled:opacity-50"
                       >
                         {pendingCountyId === entry.id ? (
@@ -260,7 +268,7 @@ export default function ResearchQueue() {
                         ) : (
                           <Sparkles className="w-3.5 h-3.5" />
                         )}
-                        Research
+                        {pendingCountyId === entry.id ? 'Researching…' : 'Research'}
                       </button>
                       <button
                         onClick={() => setReviewingCounty(entry)}
