@@ -49,7 +49,7 @@ export default function NewCountyWithResearch() {
         // Trigger research but never let a research failure block county creation;
         // the review panel handles a failed/unavailable provider gracefully.
         try {
-          await apiSend(`/api/counties/${created.id}/research`, 'POST', { provider: 'mock' });
+          await apiSend(`/api/counties/${created.id}/research`, 'POST');
         } catch {
           // Swallowed intentionally: the review panel shows manual-add either way.
         }
