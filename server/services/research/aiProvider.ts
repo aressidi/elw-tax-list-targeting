@@ -2,6 +2,15 @@ import type { ResearchCandidate, ResearchProvider } from './types.js';
 import { normalizeCandidates } from './normalize.js';
 
 const DEFAULT_TIMEOUT_MS = 15000;
+const DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1';
+const DEFAULT_MODEL = 'moonshotai/kimi-k2.5';
+const DEFAULT_WEB_SEARCH_ENGINE = 'exa';
+
+interface UrlCitationAnnotation {
+  url: string;
+  title?: string;
+  content?: string;
+}
 
 function stripCodeFences(text: string): string {
   const trimmed = text.trim();
@@ -16,38 +25,83 @@ function demoteUnsourcedCandidates(candidates: ResearchCandidate[]): ResearchCan
 }
 
 /**
- * Calls an OpenAI-compatible chat-completions endpoint backed by a
- * web-search-capable model to find real, currently-serving county officials.
- * Plain chat models without live web access will hallucinate contacts, so
- * this provider refuses to run without explicit configuration and never
- * fabricates candidates when misconfigured or when the model response is
- * unusable.
+ * Extracts OpenRouter's `url_citation` message annotations, which point at the
+ * server-side web_search results the model actually consulted.
+ */
+function extractUrlCitations(message: Record<string, unknown> | undefined): UrlCitationAnnotation[] {
+  const annotations = message?.annotations;
+  if (!Array.isArray(annotations)) return [];
+
+  const citations: UrlCitationAnnotation[] = [];
+  for (const annotation of annotations) {
+    if (typeof annotation !== 'object' || annotation === null) continue;
+    const record = annotation as Record<string, unknown>;
+    if (record.type !== 'url_citation') continue;
+    const citation = record.url_citation as Record<string, unknown> | undefined;
+    const url = typeof citation?.url === 'string' ? citation.url : null;
+    if (!url) continue;
+    citations.push({
+      url,
+      title: typeof citation?.title === 'string' ? citation.title : undefined,
+      content: typeof citation?.content === 'string' ? citation.content : undefined,
+    });
+  }
+  return citations;
+}
+
+/**
+ * Fills in sourceSnippet from a matching url_citation when the model provided
+ * a sourceUrl but skipped the snippet. Never invents a sourceUrl for a
+ * candidate that didn't already have one — citations only enrich, they never
+ * become the sole basis for a source.
+ */
+function enrichWithCitations(
+  candidates: ResearchCandidate[],
+  citations: UrlCitationAnnotation[]
+): ResearchCandidate[] {
+  if (citations.length === 0) return candidates;
+  return candidates.map((candidate) => {
+    if (!candidate.sourceUrl || candidate.sourceSnippet) return candidate;
+    const match = citations.find((citation) => citation.url === candidate.sourceUrl);
+    if (!match) return candidate;
+    const snippet = match.content || match.title || null;
+    return snippet ? { ...candidate, sourceSnippet: snippet } : candidate;
+  });
+}
+
+/**
+ * Calls an OpenAI-compatible chat-completions endpoint (defaults to OpenRouter
+ * with Kimi K2.5) to find real, currently-serving county officials. Optionally
+ * attaches OpenRouter's server-side web_search tool (Exa engine) so the model
+ * can look up current officials instead of relying on training data, which it
+ * has no live access to and would otherwise hallucinate.
  */
 export const aiResearchProvider: ResearchProvider = {
   name: 'ai',
   async research({ countyName, stateName, stateAbbreviation }) {
-    const baseUrl = process.env.RESEARCH_AI_BASE_URL;
+    const baseUrl = process.env.RESEARCH_AI_BASE_URL || DEFAULT_BASE_URL;
     const apiKey = process.env.RESEARCH_AI_API_KEY;
-    const model = process.env.RESEARCH_AI_MODEL;
+    const model = process.env.RESEARCH_AI_MODEL || DEFAULT_MODEL;
+    const webSearchEngine = process.env.RESEARCH_AI_WEB_SEARCH || DEFAULT_WEB_SEARCH_ENGINE;
+    const webSearchEnabled = webSearchEngine !== 'none';
 
-    if (!baseUrl || !apiKey || !model) {
-      const missing = [
-        !baseUrl && 'RESEARCH_AI_BASE_URL',
-        !apiKey && 'RESEARCH_AI_API_KEY',
-        !model && 'RESEARCH_AI_MODEL',
-      ].filter(Boolean).join(', ');
+    if (!apiKey) {
       return {
         ok: false,
         provider: 'ai',
         isDemo: false,
         candidates: [],
-        error: `AI research provider is not fully configured. Set ${missing} to enable it.`,
+        error: 'AI research provider is not fully configured. Set RESEARCH_AI_API_KEY to enable it.',
       };
     }
 
     const timeoutMs = Number(process.env.RESEARCH_AI_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
     const systemPrompt =
       'You are an expert researcher who finds official government contact information. ' +
+      (webSearchEnabled
+        ? 'Use the web_search tool to look up current information — you may search multiple ' +
+          'times if needed. '
+        : '') +
       'You only report real, currently-serving personnel that you can verify with a source URL. ' +
       'You never invent names, emails, phone numbers, or URLs.';
     const userPrompt =
@@ -59,6 +113,20 @@ export const aiResearchProvider: ResearchProvider = {
       '"phoneNumber":string|null,"websiteUrl":string|null,"confidence":"high"|"medium"|"low",' +
       '"sourceUrl":string|null,"sourceSnippet":string|null}]}. ' +
       'If you cannot find a verifiable official, omit them rather than guessing.';
+
+    const tools = webSearchEnabled
+      ? [
+          {
+            type: 'openrouter:web_search',
+            parameters: {
+              engine: webSearchEngine,
+              max_results: 5,
+              max_uses: 2,
+              max_total_results: 10,
+            },
+          },
+        ]
+      : undefined;
 
     try {
       const controller = new AbortController();
@@ -77,6 +145,7 @@ export const aiResearchProvider: ResearchProvider = {
               { role: 'system', content: systemPrompt },
               { role: 'user', content: userPrompt },
             ],
+            ...(tools ? { tools } : {}),
           }),
           signal: controller.signal,
         });
@@ -95,7 +164,14 @@ export const aiResearchProvider: ResearchProvider = {
       }
 
       const json = await response.json();
-      const content = json?.choices?.[0]?.message?.content;
+      // OpenRouter executes server-side tools (like web_search) internally and
+      // only returns to us once the model has produced its final answer, so a
+      // single response here may reflect several searches. We intentionally
+      // don't gate on finish_reason (it may read "tool_calls" even on a final,
+      // content-bearing turn) — the only thing that matters is whether usable
+      // message content is present.
+      const message = json?.choices?.[0]?.message as Record<string, unknown> | undefined;
+      const content = message?.content;
       if (typeof content !== 'string' || content.trim().length === 0) {
         console.debug('[aiResearchProvider] response missing usable message content', json);
         return {
@@ -122,7 +198,10 @@ export const aiResearchProvider: ResearchProvider = {
       }
 
       const rawCandidates = (parsed as Record<string, unknown>)?.candidates;
-      const candidates = demoteUnsourcedCandidates(normalizeCandidates(rawCandidates));
+      const citations = extractUrlCitations(message);
+      const candidates = demoteUnsourcedCandidates(
+        enrichWithCitations(normalizeCandidates(rawCandidates), citations)
+      );
 
       if (candidates.length === 0) {
         return {

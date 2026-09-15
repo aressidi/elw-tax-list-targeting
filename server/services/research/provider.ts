@@ -9,8 +9,9 @@ import type { ResearchProvider } from './types.js';
  *
  * - RESEARCH_PROVIDER=mock enables the deterministic offline provider everywhere.
  * - RESEARCH_PROVIDER=http enables the generic HTTP adapter (needs RESEARCH_PROVIDER_URL).
- * - RESEARCH_PROVIDER=ai enables the AI web-search adapter (needs RESEARCH_AI_BASE_URL,
- *   RESEARCH_AI_API_KEY, RESEARCH_AI_MODEL).
+ * - RESEARCH_PROVIDER=ai enables the AI web-search adapter (needs RESEARCH_AI_API_KEY;
+ *   defaults to OpenRouter + Kimi K2.5 with the openrouter:web_search tool — see
+ *   RESEARCH_AI_BASE_URL, RESEARCH_AI_MODEL, RESEARCH_AI_WEB_SEARCH).
  * - A per-request `mode: 'mock'` override is honored outside production, or in
  *   production only when RESEARCH_ALLOW_MOCK_OVERRIDE=true is explicitly set —
  *   demo data must never appear in production by default.
