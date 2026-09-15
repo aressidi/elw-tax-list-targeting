@@ -115,17 +115,37 @@ export async function sendViaTransport(input: TransportSendInput): Promise<Trans
 // concrete subject+body. Read-only; safe to call for preview purposes.
 // ============================================================
 
+export interface EmailRecipientCandidate {
+  id: number;
+  fullName: string;
+  title: string | null;
+  emailAddress: string;
+  isPrimary: boolean | null;
+}
+
 export type PrepareEmailResult =
   | {
       ok: true;
       listRequestId: number;
       recipientContactId: number;
+      recipientName: string;
+      recipientTitle: string | null;
       recipientEmail: string;
       templateId: number;
       subject: string;
       body: string;
     }
-  | { ok: false; status: number; error: string };
+  | {
+      ok: false;
+      status: number;
+      error: string;
+      // Set when the request's own referenced contact has no email on file,
+      // so the caller can offer an explicit choice among the county's other
+      // email-bearing contacts instead of silently guessing a recipient.
+      needsRecipientSelection?: boolean;
+      referencedContact?: { id: number; fullName: string };
+      candidates?: EmailRecipientCandidate[];
+    };
 
 export async function prepareListRequestEmail(listRequestId: number): Promise<PrepareEmailResult> {
   const request = await db.query.listRequests.findFirst({
@@ -151,19 +171,35 @@ export async function prepareListRequestEmail(listRequestId: number): Promise<Pr
 
   const county = request.taxOfficial.county;
   const contacts = county.taxOfficials ?? [];
-  // Mirrors the primary-contact fallback used elsewhere in the UI (county
-  // detail): prefer the contact explicitly marked primary, else the first
-  // contact on file. This may differ from the specific official the
-  // request references — sends always go to the county's current primary.
-  const recipient = contacts.find((c) => c.isPrimary) ?? contacts[0];
+  // Emails always go to the contact this specific request references (not
+  // just "whoever is county primary today") so preview/send target the same
+  // person the request was actually made to.
+  const referencedContact = request.taxOfficial;
 
-  if (!recipient || !recipient.emailAddress) {
+  if (!referencedContact.emailAddress) {
+    const candidates: EmailRecipientCandidate[] = contacts
+      .filter((c) => c.id !== referencedContact.id && !!c.emailAddress)
+      .map((c) => ({
+        id: c.id,
+        fullName: c.fullName,
+        title: c.title,
+        emailAddress: c.emailAddress as string,
+        isPrimary: c.isPrimary,
+      }));
+
     return {
       ok: false,
-      status: 400,
-      error: 'This county has no primary contact with an email address on file.',
+      status: 409,
+      error: `${referencedContact.fullName}${
+        referencedContact.title ? ` (${referencedContact.title})` : ''
+      } has no email address on file for this request.`,
+      needsRecipientSelection: true,
+      referencedContact: { id: referencedContact.id, fullName: referencedContact.fullName },
+      candidates,
     };
   }
+
+  const recipient = referencedContact;
 
   const template =
     request.foiaTemplate ??
@@ -189,6 +225,8 @@ export async function prepareListRequestEmail(listRequestId: number): Promise<Pr
     ok: true,
     listRequestId,
     recipientContactId: recipient.id,
+    recipientName: recipient.fullName,
+    recipientTitle: recipient.title,
     recipientEmail: recipient.emailAddress,
     templateId: template.id,
     subject: renderTemplateText(template.subjectLine, sampleData).slice(0, 500),
@@ -212,6 +250,8 @@ export interface SendListRequestEmailResult {
   outcome: 'sent' | 'skipped' | 'failed';
   transport?: EmailTransportName;
   messageId?: string | null;
+  recipientContactId?: number;
+  recipientName?: string;
   recipientEmail?: string;
   subject?: string;
   body?: string;
@@ -282,6 +322,8 @@ export async function sendListRequestEmail(
     outcome: 'sent',
     transport: transportResult.transport,
     messageId: transportResult.messageId,
+    recipientContactId: prepared.recipientContactId,
+    recipientName: prepared.recipientName,
     recipientEmail: prepared.recipientEmail,
     subject: prepared.subject,
     body: prepared.body,

@@ -2978,10 +2978,15 @@ router.patch('/list-requests/:id/payment', async (req, res) => {
 // ============================================================
 
 // POST /api/list-requests/:id/send-email - Render + send (or dry-run) the
-// FOIA email for this request to the county's primary contact. Pass
+// FOIA email for this request to the contact the request references. Pass
 // { dryRun: true } to only render and return the preview with no side
-// effects (no tracking row, no status change). Refuses to re-send an
-// already-sent request unless ?force=true or { force: true } is set.
+// effects (no tracking row, no status change). If that contact has no email
+// on file, the dry-run response comes back as success with
+// needsRecipientSelection: true and a list of the county's other
+// email-bearing contacts — callers should let the user pick one (via
+// PATCH /api/list-requests/:id { taxOfficialId }) rather than guessing.
+// Refuses to re-send an already-sent request unless ?force=true or
+// { force: true } is set.
 router.post('/list-requests/:id/send-email', async (req, res) => {
   try {
     const id = parseInt(req.params.id);
@@ -2992,11 +2997,27 @@ router.post('/list-requests/:id/send-email', async (req, res) => {
     if (req.body?.dryRun === true) {
       const prepared = await prepareListRequestEmail(id);
       if (!prepared.ok) {
+        if (prepared.needsRecipientSelection) {
+          return res.json(
+            successResponse({
+              listRequestId: id,
+              preview: true,
+              needsRecipientSelection: true,
+              error: prepared.error,
+              referencedContact: prepared.referencedContact,
+              candidates: prepared.candidates ?? [],
+              transport: getActiveTransport(),
+            })
+          );
+        }
         return res.status(prepared.status).json(errorResponse(prepared.error, prepared.status));
       }
       return res.json(
         successResponse({
           listRequestId: id,
+          recipientContactId: prepared.recipientContactId,
+          recipientName: prepared.recipientName,
+          recipientTitle: prepared.recipientTitle,
           recipientEmail: prepared.recipientEmail,
           subject: prepared.subject,
           body: prepared.body,
