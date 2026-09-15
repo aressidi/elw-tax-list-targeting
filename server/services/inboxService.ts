@@ -49,70 +49,218 @@ export interface RawInboxMessage {
 // Live path: shells out to the `gog` CLI, already authenticated for
 // alex@eastonlandworks.com. Per `gog gmail search --help`, the query is a
 // positional argument (Usage: gog gmail search <query> ... [flags]), not a
-// --query flag. Remaining flags follow gog's documented `gmail search`
-// interface (--json for structured output, --select to pick fields,
-// --gmail-no-send as a defense-in-depth belt so this read-only call can
-// never trigger a send even if misconfigured).
+// --query flag. `--gmail-no-send` is a defense-in-depth belt so this
+// read-only call can never trigger a send even if misconfigured.
+//
+// gog v0.39.1's `gmail search --json` is thread-level, not message-level:
+// it returns {"nextPageToken":"", "threads":[{id,date,internalDateIso,
+// from,subject,labels,messageCount}]} -- no bodies or attachments, and
+// `--select` on top of that returns `{}` since search has no per-message
+// fields to select. So search only gives us the set of matching threads;
+// for each one we then call `gog gmail thread get <threadId> --json`
+// (also read-only) to get {"downloaded":null,"thread":{"id","messages":
+// [...]}} with the full per-message payload (headers, body.data, parts).
+// We flatten every message in every matched thread -- including the
+// original outbound message if the thread has one, since a per-message
+// inbox/from filter would be guesswork against gog's shape and existing
+// downstream matching/classification plus the gmailMessageId uniqueness
+// constraint already handle stray or duplicate rows safely.
 // ------------------------------------------------------------
 
 const GOG_SEARCH_QUERY = process.env.INBOX_SEARCH_QUERY || 'newer_than:7d in:inbox';
+const GOG_EXEC_OPTS = { timeout: 30_000, maxBuffer: 10 * 1024 * 1024 };
 
-interface GogSearchMessage {
+interface GogSearchThread {
   id: string;
-  threadId?: string;
-  from?: string;
-  to?: string;
-  subject?: string;
-  body?: string;
-  bodyText?: string;
-  receivedAt?: string;
   date?: string;
-  attachments?: Array<{ filename?: string; name?: string; size?: number; sizeBytes?: number; mimeType?: string }>;
+  internalDateIso?: string;
+  from?: string;
+  subject?: string;
+  labels?: string[];
+  messageCount?: number;
 }
 
-function fetchViaGog(): Promise<RawInboxMessage[]> {
+interface GogHeader {
+  name: string;
+  value: string;
+}
+
+interface GogMessagePart {
+  filename?: string;
+  mimeType?: string;
+  body?: { data?: string; size?: number; attachmentId?: string };
+  parts?: GogMessagePart[];
+}
+
+interface GogMessage {
+  id: string;
+  threadId?: string;
+  internalDate?: string;
+  labelIds?: string[];
+  payload?: GogMessagePart & { headers?: GogHeader[] };
+}
+
+interface GogThreadGetResult {
+  downloaded?: unknown;
+  thread?: {
+    id: string;
+    date?: string;
+    internalDateIso?: string;
+    messages?: GogMessage[];
+  };
+}
+
+function execGog(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(
-      'gog',
-      [
-        'gmail',
-        'search',
-        GOG_SEARCH_QUERY,
-        '--json',
-        '--select',
-        'id,threadId,from,to,subject,body,receivedAt,attachments',
-        '--gmail-no-send',
-      ],
-      { timeout: 30_000, maxBuffer: 10 * 1024 * 1024 },
-      (error, stdout, stderr) => {
-        if (error) {
-          reject(new Error(stderr?.trim() || error.message));
-          return;
-        }
-        try {
-          const parsed = JSON.parse(stdout) as GogSearchMessage[];
-          resolve(
-            parsed.map((m) => ({
-              gmailMessageId: m.id,
-              threadId: m.threadId ?? null,
-              from: m.from ?? '',
-              to: m.to ?? '',
-              subject: m.subject ?? '',
-              bodyText: m.bodyText ?? m.body ?? '',
-              receivedAt: m.receivedAt || m.date ? new Date(m.receivedAt ?? m.date!) : new Date(),
-              attachments: (m.attachments ?? []).map((a) => ({
-                filename: a.filename ?? a.name ?? 'attachment',
-                sizeBytes: a.sizeBytes ?? a.size ?? 0,
-                kind: (a.filename ?? a.name ?? '').split('.').pop()?.toLowerCase() ?? a.mimeType ?? 'other',
-              })),
-            }))
-          );
-        } catch (parseError) {
-          reject(new Error(`Failed to parse gog output: ${(parseError as Error).message}`));
-        }
+    execFile('gog', args, GOG_EXEC_OPTS, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(stderr?.trim() || error.message));
+        return;
       }
-    );
+      resolve(stdout);
+    });
   });
+}
+
+// Accepts the current {threads:[...]} shape, and defensively also a bare
+// array or {messages:[...]} in case gog's search output shifts again.
+function extractSearchThreads(parsed: unknown): GogSearchThread[] {
+  if (Array.isArray(parsed)) return parsed as GogSearchThread[];
+  if (parsed && typeof parsed === 'object') {
+    const obj = parsed as Record<string, unknown>;
+    if (Array.isArray(obj.threads)) return obj.threads as GogSearchThread[];
+    if (Array.isArray(obj.messages)) return obj.messages as GogSearchThread[];
+  }
+  return [];
+}
+
+function headerValue(headers: GogHeader[] | undefined, name: string): string {
+  if (!headers) return '';
+  const lower = name.toLowerCase();
+  return headers.find((h) => h.name?.toLowerCase() === lower)?.value ?? '';
+}
+
+function decodeBase64Url(data: string): string {
+  const normalized = data.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized.padEnd(normalized.length + ((4 - (normalized.length % 4)) % 4), '=');
+  return Buffer.from(padded, 'base64').toString('utf8');
+}
+
+// Depth-first search for the first text/plain part with body data, falling
+// back to the first part with any body data (e.g. text/html) if no plain
+// part is present.
+function findBestBodyText(part: GogMessagePart | undefined): string {
+  if (!part) return '';
+
+  let plainFallback = '';
+  let anyFallback = '';
+
+  function visit(p: GogMessagePart): boolean {
+    const data = p.body?.data;
+    if (data) {
+      const decoded = decodeBase64Url(data);
+      if (p.mimeType === 'text/plain' && !plainFallback) {
+        plainFallback = decoded;
+      }
+      if (!anyFallback) {
+        anyFallback = decoded;
+      }
+      if (plainFallback) return true;
+    }
+    for (const child of p.parts ?? []) {
+      if (visit(child)) return true;
+    }
+    return false;
+  }
+
+  visit(part);
+  return plainFallback || anyFallback;
+}
+
+function extractAttachments(part: GogMessagePart | undefined): RawAttachment[] {
+  if (!part) return [];
+  const results: RawAttachment[] = [];
+
+  function visit(p: GogMessagePart): void {
+    if (p.filename) {
+      results.push({
+        filename: p.filename,
+        sizeBytes: p.body?.size ?? 0,
+        kind: p.filename.includes('.')
+          ? (p.filename.split('.').pop()?.toLowerCase() ?? 'other')
+          : (p.mimeType ?? 'other'),
+      });
+    }
+    for (const child of p.parts ?? []) {
+      visit(child);
+    }
+  }
+
+  for (const child of part.parts ?? []) {
+    visit(child);
+  }
+  return results;
+}
+
+function parseReceivedAt(message: GogMessage, thread: GogThreadGetResult['thread']): Date {
+  const internalDateMs = Number(message.internalDate);
+  if (Number.isFinite(internalDateMs) && internalDateMs > 0) {
+    return new Date(internalDateMs);
+  }
+  const threadDate = thread?.internalDateIso || thread?.date;
+  if (threadDate) {
+    const parsed = new Date(threadDate);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return new Date();
+}
+
+function flattenGogMessage(message: GogMessage, thread: GogThreadGetResult['thread']): RawInboxMessage {
+  const headers = message.payload?.headers;
+  return {
+    gmailMessageId: message.id,
+    threadId: thread?.id ?? message.threadId ?? null,
+    from: headerValue(headers, 'from'),
+    to: headerValue(headers, 'to'),
+    subject: headerValue(headers, 'subject'),
+    bodyText: findBestBodyText(message.payload),
+    receivedAt: parseReceivedAt(message, thread),
+    attachments: extractAttachments(message.payload),
+  };
+}
+
+async function fetchViaGog(): Promise<RawInboxMessage[]> {
+  const searchStdout = await execGog(['gmail', 'search', GOG_SEARCH_QUERY, '--json', '--gmail-no-send']);
+
+  let searchParsed: unknown;
+  try {
+    searchParsed = JSON.parse(searchStdout);
+  } catch (parseError) {
+    throw new Error(`Failed to parse gog search output: ${(parseError as Error).message}`);
+  }
+
+  const threads = extractSearchThreads(searchParsed);
+  const results: RawInboxMessage[] = [];
+
+  for (const searchThread of threads) {
+    const threadStdout = await execGog(['gmail', 'thread', 'get', searchThread.id, '--json']);
+
+    let threadParsed: GogThreadGetResult;
+    try {
+      threadParsed = JSON.parse(threadStdout) as GogThreadGetResult;
+    } catch (parseError) {
+      throw new Error(
+        `Failed to parse gog thread get output for thread ${searchThread.id}: ${(parseError as Error).message}`
+      );
+    }
+
+    const thread = threadParsed.thread;
+    for (const message of thread?.messages ?? []) {
+      results.push(flattenGogMessage(message, thread));
+    }
+  }
+
+  return results;
 }
 
 // ------------------------------------------------------------
