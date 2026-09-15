@@ -34,17 +34,37 @@ interface TransportSendResult {
 }
 
 // Live path: shells out to the `gog` CLI, already authenticated for
-// alex@eastonlandworks.com. Flags follow gog's documented `gmail send`
-// interface (recipient/subject/body flags); this is the one place to
-// adjust them if the installed gog version's flags differ. UNVERIFIED
-// against a live `gog gmail send --help` — the sandbox this was written in
-// could not run that command. Confirm the flag names before relying on
-// this path for a real send.
+// alex@eastonlandworks.com. Flags verified against live gog v0.39.1 on
+// 2026-09-15 via `gog gmail send --help`: --to, --subject, --body,
+// --body-html, -a/--account, --signature all confirmed.
 function sendViaGog(input: TransportSendInput): Promise<TransportSendResult> {
   return new Promise((resolve) => {
+    const bin = process.env.EMAIL_GOG_BIN || 'gog';
+    const useHtml = /^(1|true)$/i.test(process.env.EMAIL_SEND_HTML || '');
+    const useSignature = /^(1|true)$/i.test(process.env.EMAIL_GOG_SIGNATURE || '');
+    const account = process.env.EMAIL_GOG_ACCOUNT;
+
+    const args = [
+      'gmail',
+      'send',
+      '--to',
+      input.to,
+      '--subject',
+      input.subject,
+      useHtml ? '--body-html' : '--body',
+      input.body,
+    ];
+
+    if (account) {
+      args.push('-a', account);
+    }
+    if (useSignature) {
+      args.push('--signature');
+    }
+
     execFile(
-      'gog',
-      ['gmail', 'send', '--to', input.to, '--subject', input.subject, '--body', input.body],
+      bin,
+      args,
       { timeout: 30_000 },
       (error, stdout, stderr) => {
         if (error) {
