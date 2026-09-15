@@ -218,13 +218,32 @@ export interface TemplatePreviewResult {
 
 export type EmailTransportName = 'dry_run' | 'gog';
 
+export interface EmailRecipientCandidate {
+  id: number;
+  fullName: string;
+  title: string | null;
+  emailAddress: string;
+  isPrimary: boolean | null;
+}
+
+// When needsRecipientSelection is true, the request's referenced contact has
+// no email on file — recipient/subject/body are omitted and the caller
+// should offer `candidates` (the county's other email-bearing contacts) as
+// an explicit choice rather than guessing a recipient.
 export interface EmailSendPreview {
   listRequestId: number;
-  recipientEmail: string;
-  subject: string;
-  body: string;
   transport: EmailTransportName;
   preview: true;
+  needsRecipientSelection?: boolean;
+  error?: string;
+  referencedContact?: { id: number; fullName: string };
+  candidates?: EmailRecipientCandidate[];
+  recipientContactId?: number;
+  recipientName?: string;
+  recipientTitle?: string | null;
+  recipientEmail?: string;
+  subject?: string;
+  body?: string;
 }
 
 export interface EmailSendResult {
@@ -232,6 +251,8 @@ export interface EmailSendResult {
   outcome: 'sent';
   transport: EmailTransportName;
   messageId: string | null;
+  recipientContactId: number;
+  recipientName: string;
   recipientEmail: string;
   subject: string;
   body: string;

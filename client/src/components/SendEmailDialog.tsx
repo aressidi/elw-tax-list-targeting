@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle } from 'lucide-react';
 import { apiSend, ApiError } from '../lib/api';
 import type { EmailSendPreview, EmailSendResult } from '../types';
@@ -26,7 +26,9 @@ export default function SendEmailDialog({
   onSent,
 }: SendEmailDialogProps) {
   const toast = useToast();
+  const queryClient = useQueryClient();
   const [forceResend, setForceResend] = useState(false);
+  const [selectedCandidateId, setSelectedCandidateId] = useState<number | null>(null);
 
   const preview = useQuery({
     queryKey: ['send-email-preview', listRequestId],
@@ -36,6 +38,25 @@ export default function SendEmailDialog({
           dryRun: true,
         })
       ).data ?? null,
+  });
+
+  const needsRecipientSelection = !!preview.data?.needsRecipientSelection;
+  const candidates = preview.data?.candidates ?? [];
+
+  const useRecipient = useMutation({
+    mutationFn: (taxOfficialId: number) =>
+      apiSend(`/api/list-requests/${listRequestId}`, 'PATCH', { taxOfficialId }),
+    onSuccess: () => {
+      // The request now targets a different contact — re-render the
+      // preview against it, and let callers (county/list pages) refresh
+      // anything that shows which official this request is for.
+      queryClient.invalidateQueries({ queryKey: ['send-email-preview', listRequestId] });
+      setSelectedCandidateId(null);
+      onSent();
+    },
+    onError: (error: unknown) => {
+      toast.showError(error instanceof ApiError ? error.message : 'Failed to update the request recipient.');
+    },
   });
 
   const send = useMutation({
@@ -60,7 +81,8 @@ export default function SendEmailDialog({
   });
 
   const isLive = preview.data?.transport === 'gog';
-  const canSend = !!preview.data && (!alreadySent || forceResend);
+  const canSend = !!preview.data && !needsRecipientSelection && !!preview.data.recipientEmail && (!alreadySent || forceResend);
+  const recipientName = preview.data?.recipientName ?? recipientLabel;
 
   return (
     <Modal title="Send FOIA Request Email" onClose={onClose} widthClassName="max-w-2xl">
@@ -73,10 +95,74 @@ export default function SendEmailDialog({
         </div>
       )}
 
-      {preview.data && (
+      {preview.data && needsRecipientSelection && (
+        <div className="space-y-4">
+          <div className="flex items-start gap-2 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+            <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+            <span>
+              {preview.data.error ??
+                `${preview.data.referencedContact?.fullName ?? 'The contact for this request'} has no email address on file.`}{' '}
+              Choose another contact to send this request to.
+            </span>
+          </div>
+
+          {candidates.length === 0 ? (
+            <p className="text-sm text-gray-500">
+              No other contact on file for this county has an email address. Add one via the county's Contacts
+              section, then reopen this dialog.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {candidates.map((candidate) => (
+                <label
+                  key={candidate.id}
+                  className="flex items-start gap-3 border rounded-lg p-3 text-sm cursor-pointer hover:bg-gray-50"
+                >
+                  <input
+                    type="radio"
+                    name="recipient-candidate"
+                    className="mt-1"
+                    checked={selectedCandidateId === candidate.id}
+                    onChange={() => setSelectedCandidateId(candidate.id)}
+                  />
+                  <span>
+                    <span className="font-medium text-gray-900">{candidate.fullName}</span>
+                    {candidate.isPrimary && (
+                      <span className="ml-2 text-xs text-blue-700 bg-blue-100 px-2 py-0.5 rounded-full">
+                        Primary
+                      </span>
+                    )}
+                    {candidate.title && <span className="block text-gray-500">{candidate.title}</span>}
+                    <span className="block text-gray-600">{candidate.emailAddress}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          )}
+
+          <div className="flex justify-end gap-3 pt-2">
+            <button
+              onClick={onClose}
+              disabled={useRecipient.isPending}
+              className="px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-lg disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => selectedCandidateId != null && useRecipient.mutate(selectedCandidateId)}
+              disabled={selectedCandidateId == null || useRecipient.isPending}
+              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50"
+            >
+              {useRecipient.isPending ? 'Updating...' : 'Use this contact'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {preview.data && !needsRecipientSelection && (
         <div className="space-y-4">
           <p className="text-sm text-gray-500">
-            To: <span className="font-medium text-gray-800">{recipientLabel}</span>{' '}
+            To: <span className="font-medium text-gray-800">{recipientName}</span>{' '}
             &lt;{preview.data.recipientEmail}&gt;
           </p>
 

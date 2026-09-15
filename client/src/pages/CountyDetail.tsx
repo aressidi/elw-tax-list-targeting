@@ -254,7 +254,10 @@ export default function CountyDetail() {
   }, [county]);
 
   const primaryContact = county?.taxOfficials.find((o) => o.isPrimary) ?? county?.taxOfficials[0];
-  const hasPrimaryEmail = !!primaryContact?.emailAddress;
+  // Gate on "can this county send anything at all" rather than the primary
+  // contact specifically — a request can still be sent to a non-primary
+  // contact, or reassigned to one, via the send dialog's recipient picker.
+  const countyHasEmailContact = !!county?.taxOfficials.some((o) => !!o.emailAddress);
 
   if (isLoading) return <LoadingState label="Loading county..." />;
   if (isError || !county) {
@@ -569,8 +572,8 @@ export default function CountyDetail() {
                   </p>
                   <button
                     onClick={() => setSendingRequest(request)}
-                    disabled={!hasPrimaryEmail}
-                    title={!hasPrimaryEmail ? 'This county has no primary contact with an email address' : undefined}
+                    disabled={!countyHasEmailContact}
+                    title={!countyHasEmailContact ? 'No contact for this county has an email address on file' : undefined}
                     className="inline-flex items-center gap-1.5 text-sm font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <Send className="w-3.5 h-3.5" />
@@ -669,7 +672,10 @@ export default function CountyDetail() {
       {sendingRequest && (
         <SendEmailDialog
           listRequestId={sendingRequest.id}
-          recipientLabel={primaryContact?.fullName ?? 'Primary contact'}
+          recipientLabel={
+            allListRequests.find(({ request }) => request.id === sendingRequest.id)?.official.fullName ??
+            'the contact on file'
+          }
           alreadySent={!!sendingRequest.emailSentAt}
           onClose={() => setSendingRequest(null)}
           onSent={invalidateCounty}
