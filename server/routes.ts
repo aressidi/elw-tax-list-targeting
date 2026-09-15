@@ -794,8 +794,14 @@ router.post('/counties/:id/research', async (req, res) => {
     }
 
     const { provider, force } = req.body ?? {};
-    if (provider !== undefined && provider !== null && provider !== 'mock' && provider !== 'http') {
-      return res.status(400).json(errorResponse('provider must be "mock" or "http"', 400));
+    if (
+      provider !== undefined &&
+      provider !== null &&
+      provider !== 'mock' &&
+      provider !== 'http' &&
+      provider !== 'ai'
+    ) {
+      return res.status(400).json(errorResponse('provider must be "mock", "http", or "ai"', 400));
     }
 
     const result = await triggerCountyResearch(id, {
@@ -1462,8 +1468,14 @@ router.post('/contacts/:id/verify', async (req, res) => {
     }
 
     const { provider, force } = req.body ?? {};
-    if (provider !== undefined && provider !== null && provider !== 'mock' && provider !== 'http') {
-      return res.status(400).json(errorResponse('provider must be "mock" or "http"', 400));
+    if (
+      provider !== undefined &&
+      provider !== null &&
+      provider !== 'mock' &&
+      provider !== 'http' &&
+      provider !== 'ai'
+    ) {
+      return res.status(400).json(errorResponse('provider must be "mock", "http", or "ai"', 400));
     }
 
     const result = await triggerCountyResearch(contact.countyId, {

@@ -111,7 +111,7 @@ export default function ResearchReviewPanel({ county, onClose }: ResearchReviewP
 
   const runResearch = useMutation({
     mutationFn: (force: boolean) =>
-      apiSend(`/api/counties/${county.id}/research`, 'POST', { provider: 'mock', force }),
+      apiSend(`/api/counties/${county.id}/research`, 'POST', { force }),
     onSuccess: () => {
       invalidateAfterChange();
       toast.showSuccess('Research complete. Review the results below.');

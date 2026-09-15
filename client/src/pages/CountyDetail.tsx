@@ -199,7 +199,7 @@ export default function CountyDetail() {
   });
 
   const verifyContact = useMutation({
-    mutationFn: (contactId: number) => apiSend(`/api/contacts/${contactId}/verify`, 'POST', { provider: 'mock' }),
+    mutationFn: (contactId: number) => apiSend(`/api/contacts/${contactId}/verify`, 'POST'),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['research-results', countyId] });
       invalidateCounty();

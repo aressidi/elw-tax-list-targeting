@@ -56,7 +56,7 @@ export default function ResearchQueue() {
 
   const triggerResearch = useMutation({
     mutationFn: (countyId: number) =>
-      apiSend(`/api/counties/${countyId}/research`, 'POST', { provider: 'mock' }),
+      apiSend(`/api/counties/${countyId}/research`, 'POST'),
     onMutate: (countyId) => setPendingCountyId(countyId),
     onSuccess: (_result, countyId) => {
       invalidateQueue();
