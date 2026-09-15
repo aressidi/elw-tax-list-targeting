@@ -33,16 +33,34 @@ interface TransportSendResult {
   error: string | null;
 }
 
+// Looks-like-HTML guard: if the body already starts with a tag, or contains
+// a block-level tag we'd otherwise mangle, pass it through untouched.
+function looksLikeHtml(body: string): boolean {
+  return /^\s*</.test(body) || /<p[\s>]|<div[\s>]|<br\s*\/?>/i.test(body);
+}
+
+// Converts a plain-text body to minimal HTML for --body-html: escapes
+// &, <, > and turns newlines into <br />. Bullet characters (•, -, etc.)
+// are left as-is since no list markup is required.
+function plainTextToHtml(body: string): string {
+  const escaped = body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return escaped.replace(/\n/g, '<br />');
+}
+
 // Live path: shells out to the `gog` CLI, already authenticated for
 // alex@eastonlandworks.com. Flags verified against live gog v0.39.1 on
 // 2026-09-15 via `gog gmail send --help`: --to, --subject, --body,
-// --body-html, -a/--account, --signature all confirmed.
+// --body-html, -a/--account, --signature all confirmed. Also verified that
+// in --body-html mode --signature appends the full HTML signature
+// (including picture), while in --body mode it appends the plaintext one.
 function sendViaGog(input: TransportSendInput): Promise<TransportSendResult> {
   return new Promise((resolve) => {
     const bin = process.env.EMAIL_GOG_BIN || 'gog';
     const useHtml = /^(1|true)$/i.test(process.env.EMAIL_SEND_HTML || '');
     const useSignature = /^(1|true)$/i.test(process.env.EMAIL_GOG_SIGNATURE || '');
     const account = process.env.EMAIL_GOG_ACCOUNT;
+
+    const body = useHtml && !looksLikeHtml(input.body) ? plainTextToHtml(input.body) : input.body;
 
     const args = [
       'gmail',
@@ -52,7 +70,7 @@ function sendViaGog(input: TransportSendInput): Promise<TransportSendResult> {
       '--subject',
       input.subject,
       useHtml ? '--body-html' : '--body',
-      input.body,
+      body,
     ];
 
     if (account) {
