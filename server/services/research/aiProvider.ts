@@ -1,10 +1,20 @@
-import type { ResearchCandidate, ResearchProvider } from './types.js';
+import type { ResearchCandidate, ResearchOutcome, ResearchProvider } from './types.js';
 import { normalizeCandidates } from './normalize.js';
 
 const DEFAULT_TIMEOUT_MS = 15000;
 const DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1';
 const DEFAULT_MODEL = 'moonshotai/kimi-k2.5';
 const DEFAULT_WEB_SEARCH_ENGINE = 'exa';
+
+// OpenRouter's server-side web_search tool can occasionally run long enough to
+// brush up against RESEARCH_AI_TIMEOUT_MS (observed: a successful run taking
+// ~113s against a 120s budget, and other counties aborting right at 120s).
+// One automatic retry absorbs that jitter without turning a stuck request
+// into an unbounded wait: total worst-case time is capped at
+// maxAttempts * timeoutMs, and only timeouts are retried — a bad API key,
+// malformed response, or empty result set retries wouldn't fix, so those
+// still fail on the first attempt.
+const DEFAULT_MAX_ATTEMPTS = 2;
 
 interface UrlCitationAnnotation {
   url: string;
@@ -69,6 +79,91 @@ function enrichWithCitations(
   });
 }
 
+function failure(error: string): ResearchOutcome {
+  return { ok: false, provider: 'ai', isDemo: false, candidates: [], error };
+}
+
+/** True for both DOMException aborts (browser-style fetch) and Node's AbortError. */
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+interface AttemptParams {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  systemPrompt: string;
+  userPrompt: string;
+  tools: unknown[] | undefined;
+  timeoutMs: number;
+}
+
+/** Runs exactly one request/response cycle against the chat-completions endpoint. */
+async function performAttempt(params: AttemptParams): Promise<ResearchOutcome> {
+  const { baseUrl, apiKey, model, systemPrompt, userPrompt, tools, timeoutMs } = params;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        ...(tools ? { tools } : {}),
+      }),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!response.ok) {
+    return failure(`AI research provider responded with status ${response.status}.`);
+  }
+
+  const json = await response.json();
+  // OpenRouter executes server-side tools (like web_search) internally and
+  // only returns to us once the model has produced its final answer, so a
+  // single response here may reflect several searches. We intentionally
+  // don't gate on finish_reason (it may read "tool_calls" even on a final,
+  // content-bearing turn) — the only thing that matters is whether usable
+  // message content is present.
+  const message = json?.choices?.[0]?.message as Record<string, unknown> | undefined;
+  const content = message?.content;
+  if (typeof content !== 'string' || content.trim().length === 0) {
+    console.debug('[aiResearchProvider] response missing usable message content', json);
+    return failure('AI research provider returned an empty or unusable response.');
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stripCodeFences(content));
+  } catch {
+    console.debug('[aiResearchProvider] failed to parse model response as JSON', content);
+    return failure('AI research provider returned a response that could not be parsed as JSON.');
+  }
+
+  const rawCandidates = (parsed as Record<string, unknown>)?.candidates;
+  const citations = extractUrlCitations(message);
+  const candidates = demoteUnsourcedCandidates(
+    enrichWithCitations(normalizeCandidates(rawCandidates), citations)
+  );
+
+  if (candidates.length === 0) {
+    return failure('AI research provider did not return any usable candidates.');
+  }
+
+  return { ok: true, provider: 'ai', isDemo: false, candidates };
+}
+
 /**
  * Calls an OpenAI-compatible chat-completions endpoint (defaults to OpenRouter
  * with Kimi K2.5) to find real, currently-serving county officials. Optionally
@@ -86,16 +181,11 @@ export const aiResearchProvider: ResearchProvider = {
     const webSearchEnabled = webSearchEngine !== 'none';
 
     if (!apiKey) {
-      return {
-        ok: false,
-        provider: 'ai',
-        isDemo: false,
-        candidates: [],
-        error: 'AI research provider is not fully configured. Set RESEARCH_AI_API_KEY to enable it.',
-      };
+      return failure('AI research provider is not fully configured. Set RESEARCH_AI_API_KEY to enable it.');
     }
 
     const timeoutMs = Number(process.env.RESEARCH_AI_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
+    const maxAttempts = Math.max(1, Number(process.env.RESEARCH_AI_MAX_ATTEMPTS) || DEFAULT_MAX_ATTEMPTS);
     const systemPrompt =
       'You are an expert researcher who finds official government contact information. ' +
       (webSearchEnabled
@@ -128,100 +218,42 @@ export const aiResearchProvider: ResearchProvider = {
         ]
       : undefined;
 
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), timeoutMs);
-      let response: Response;
+    const attemptParams: AttemptParams = { baseUrl, apiKey, model, systemPrompt, userPrompt, tools, timeoutMs };
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        response = await fetch(`${baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify({
-            model,
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: userPrompt },
-            ],
-            ...(tools ? { tools } : {}),
-          }),
-          signal: controller.signal,
-        });
-      } finally {
-        clearTimeout(timeout);
+        const outcome = await performAttempt(attemptParams);
+        if (outcome.ok) return outcome;
+        // A definitive failure (bad status, unparseable/empty response, no
+        // candidates) won't be fixed by retrying the exact same request, so
+        // only timeouts get another attempt.
+        return outcome;
+      } catch (error) {
+        const timedOut = isAbortError(error);
+        const isLastAttempt = attempt === maxAttempts;
+        if (timedOut && !isLastAttempt) {
+          console.debug(
+            `[aiResearchProvider] attempt ${attempt}/${maxAttempts} timed out after ${timeoutMs}ms, retrying`
+          );
+          continue;
+        }
+
+        if (timedOut) {
+          const totalWaitedS = Math.round((timeoutMs * maxAttempts) / 1000);
+          const retryCount = maxAttempts - 1;
+          return failure(
+            `AI research timed out after ${Math.round(timeoutMs / 1000)}s per attempt` +
+              (retryCount > 0 ? ` (retried ${retryCount} time${retryCount === 1 ? '' : 's'}, ${totalWaitedS}s total)` : '') +
+              '. OpenRouter web_search can run long for some counties — try again, ' +
+              'or raise RESEARCH_AI_TIMEOUT_MS if this keeps happening.'
+          );
+        }
+
+        return failure(error instanceof Error ? error.message : 'AI research provider request failed.');
       }
-
-      if (!response.ok) {
-        return {
-          ok: false,
-          provider: 'ai',
-          isDemo: false,
-          candidates: [],
-          error: `AI research provider responded with status ${response.status}.`,
-        };
-      }
-
-      const json = await response.json();
-      // OpenRouter executes server-side tools (like web_search) internally and
-      // only returns to us once the model has produced its final answer, so a
-      // single response here may reflect several searches. We intentionally
-      // don't gate on finish_reason (it may read "tool_calls" even on a final,
-      // content-bearing turn) — the only thing that matters is whether usable
-      // message content is present.
-      const message = json?.choices?.[0]?.message as Record<string, unknown> | undefined;
-      const content = message?.content;
-      if (typeof content !== 'string' || content.trim().length === 0) {
-        console.debug('[aiResearchProvider] response missing usable message content', json);
-        return {
-          ok: false,
-          provider: 'ai',
-          isDemo: false,
-          candidates: [],
-          error: 'AI research provider returned an empty or unusable response.',
-        };
-      }
-
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(stripCodeFences(content));
-      } catch {
-        console.debug('[aiResearchProvider] failed to parse model response as JSON', content);
-        return {
-          ok: false,
-          provider: 'ai',
-          isDemo: false,
-          candidates: [],
-          error: 'AI research provider returned a response that could not be parsed as JSON.',
-        };
-      }
-
-      const rawCandidates = (parsed as Record<string, unknown>)?.candidates;
-      const citations = extractUrlCitations(message);
-      const candidates = demoteUnsourcedCandidates(
-        enrichWithCitations(normalizeCandidates(rawCandidates), citations)
-      );
-
-      if (candidates.length === 0) {
-        return {
-          ok: false,
-          provider: 'ai',
-          isDemo: false,
-          candidates: [],
-          error: 'AI research provider did not return any usable candidates.',
-        };
-      }
-
-      return { ok: true, provider: 'ai', isDemo: false, candidates };
-    } catch (error) {
-      return {
-        ok: false,
-        provider: 'ai',
-        isDemo: false,
-        candidates: [],
-        error: error instanceof Error ? error.message : 'AI research provider request failed.',
-      };
     }
+
+    // Unreachable: the loop above always returns on its last iteration.
+    return failure('AI research provider request failed.');
   },
 };

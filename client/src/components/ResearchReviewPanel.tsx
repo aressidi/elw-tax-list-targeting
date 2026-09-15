@@ -111,10 +111,19 @@ export default function ResearchReviewPanel({ county, onClose }: ResearchReviewP
 
   const runResearch = useMutation({
     mutationFn: (force: boolean) =>
-      apiSend(`/api/counties/${county.id}/research`, 'POST', { force }),
-    onSuccess: () => {
+      apiSend<{ status: string; errorMessage: string | null }>(`/api/counties/${county.id}/research`, 'POST', {
+        force,
+      }),
+    onSuccess: (result) => {
       invalidateAfterChange();
-      toast.showSuccess('Research complete. Review the results below.');
+      // A provider timeout/failure comes back as a normal (HTTP 200) response —
+      // it's a recorded, retryable research outcome, not a server error — so
+      // check the run's own status rather than assuming success.
+      if (result.data?.status === 'failed') {
+        toast.showError(result.data.errorMessage || 'Research failed. See the error below and try again.');
+      } else {
+        toast.showSuccess('Research complete. Review the results below.');
+      }
     },
     onError: (error: unknown) => {
       toast.showError(error instanceof ApiError ? error.message : 'Failed to trigger research.');
@@ -254,6 +263,7 @@ export default function ResearchReviewPanel({ county, onClose }: ResearchReviewP
               <button
                 onClick={() => runResearch.mutate(true)}
                 disabled={busy}
+                title={runResearch.isPending ? 'AI research with web search can take up to a couple minutes.' : undefined}
                 className="inline-flex items-center gap-1.5 text-sm font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-lg disabled:opacity-50"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${runResearch.isPending ? 'animate-spin' : ''}`} />
