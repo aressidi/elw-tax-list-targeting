@@ -94,6 +94,8 @@ export interface ListRequest {
   assignedTo: string | null;
   foiaTemplateId: number | null;
   emailSentAt: string | null;
+  queuedAt: string | null;
+  scheduledSendAt: string | null;
   listFileReceived?: boolean;
   createdAt: string;
   updatedAt: string;
