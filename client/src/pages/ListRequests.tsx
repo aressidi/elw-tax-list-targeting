@@ -1,13 +1,27 @@
 import { useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { FileText, Clock, CheckCircle, XCircle, Send, Timer, Paperclip } from 'lucide-react';
-import { apiGet } from '../lib/api';
+import { FileText, Clock, CheckCircle, XCircle, Send, Timer, Paperclip, Trash2 } from 'lucide-react';
+import { apiGet, apiSend, ApiError } from '../lib/api';
 import { LoadingState, ErrorState, EmptyState } from '../components/QueryState';
 import SendEmailDialog from '../components/SendEmailDialog';
 import BulkSendEmailDialog from '../components/BulkSendEmailDialog';
 import BulkEnqueueEmailDialog from '../components/BulkEnqueueEmailDialog';
 import EnqueueEmailDialog from '../components/EnqueueEmailDialog';
 import FileUploadDialog from '../components/FileUploadDialog';
+import ConfirmDialog from '../components/ConfirmDialog';
+
+// A request is deletable only before it has been started in any way. This
+// mirrors the server-side guard (DELETE /api/list-requests/:id) using the
+// fields the list row carries; the server stays authoritative and re-checks
+// the full condition (including audit-trail rows) before deleting.
+function isDeletable(request: ListRequestRow): boolean {
+  return (
+    request.requestStatus === 'not_started' &&
+    !request.emailSentAt &&
+    !request.queuedAt &&
+    !request.scheduledSendAt
+  );
+}
 
 interface ListRequestRow {
   id: number;
@@ -38,6 +52,9 @@ export default function ListRequests() {
   const [sendingRequest, setSendingRequest] = useState<ListRequestRow | null>(null);
   const [enqueuingRequest, setEnqueuingRequest] = useState<ListRequestRow | null>(null);
   const [filesRequest, setFilesRequest] = useState<ListRequestRow | null>(null);
+  const [deletingRequest, setDeletingRequest] = useState<ListRequestRow | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [showBulkSend, setShowBulkSend] = useState(false);
   const [showBulkEnqueue, setShowBulkEnqueue] = useState(false);
 
@@ -48,6 +65,21 @@ export default function ListRequests() {
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ['list-requests'] });
+  };
+
+  const confirmDelete = async () => {
+    if (!deletingRequest) return;
+    setDeleteBusy(true);
+    setDeleteError(null);
+    try {
+      await apiSend(`/api/list-requests/${deletingRequest.id}`, 'DELETE');
+      setDeletingRequest(null);
+      invalidate();
+    } catch (err) {
+      setDeleteError(err instanceof ApiError ? err.message : 'Failed to delete list request.');
+    } finally {
+      setDeleteBusy(false);
+    }
   };
 
   const toggleSelected = (id: number) => {
@@ -242,6 +274,19 @@ export default function ListRequests() {
                         <Send className="w-3.5 h-3.5" />
                         {request.emailSentAt ? 'Resend' : 'Send'}
                       </button>
+                      {isDeletable(request) && (
+                        <button
+                          onClick={() => {
+                            setDeleteError(null);
+                            setDeletingRequest(request);
+                          }}
+                          className="inline-flex items-center gap-1.5 text-sm font-medium text-red-600 hover:text-red-800"
+                          aria-label={`Delete request #${request.id}`}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          Delete
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -276,6 +321,24 @@ export default function ListRequests() {
           requestLabel={`${filesRequest.taxOfficial.county.name} County, ${filesRequest.taxOfficial.county.state.abbreviation}`}
           onClose={() => setFilesRequest(null)}
           onChanged={invalidate}
+        />
+      )}
+
+      {deletingRequest && (
+        <ConfirmDialog
+          title="Delete list request"
+          message={
+            deleteError
+              ? deleteError
+              : `Delete request #${deletingRequest.id} for ${deletingRequest.taxOfficial.county.name}, ${deletingRequest.taxOfficial.county.state.abbreviation}? This request has not been started and will be permanently removed.`
+          }
+          confirmLabel="Delete"
+          busy={deleteBusy}
+          onConfirm={confirmDelete}
+          onCancel={() => {
+            setDeletingRequest(null);
+            setDeleteError(null);
+          }}
         />
       )}
 

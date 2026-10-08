@@ -46,6 +46,7 @@ import {
 } from './services/queueService.js';
 import { pollInbox, getActiveInboxProvider } from './services/inboxService.js';
 import { applyReviewClassification } from './services/responseClassification.js';
+import { evaluateListRequestDeletable } from './services/listRequestDeletion.js';
 import {
   applyPipelineStatusChange,
   getDashboardMetrics,
@@ -2066,6 +2067,58 @@ router.patch('/list-requests/:id', async (req, res) => {
   } catch (error) {
     console.error('Error updating list request:', error);
     res.status(500).json(errorResponse('Failed to update list request'));
+  }
+});
+
+// DELETE /api/list-requests/:id - Delete a request that has NOT been started
+// (card 96127e3a) — e.g. an accidental request created before/while requesting
+// a county list. The "not started" guard is enforced server-side via
+// evaluateListRequestDeletable; a started request is refused with 409 and left
+// untouched. Children cascade on delete (list_request_prices,
+// list_request_events, list_request_status_history, processed_lists) and
+// inbox_items.list_request_id is set null, all via the schema's onDelete rules.
+router.delete('/list-requests/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) {
+      return res.status(400).json(errorResponse('Invalid list request ID', 400));
+    }
+
+    const request = await db.query.listRequests.findFirst({
+      where: eq(listRequests.id, id),
+    });
+
+    if (!request) {
+      return res.status(404).json(errorResponse('List request not found', 404));
+    }
+
+    const [eventCountRow, statusHistoryCountRow] = await Promise.all([
+      db.select({ value: count() }).from(listRequestEvents)
+        .where(eq(listRequestEvents.listRequestId, id)),
+      db.select({ value: count() }).from(listRequestStatusHistory)
+        .where(eq(listRequestStatusHistory.listRequestId, id)),
+    ]);
+
+    const { deletable, reason } = evaluateListRequestDeletable({
+      requestStatus: request.requestStatus,
+      emailSentAt: request.emailSentAt,
+      queuedAt: request.queuedAt,
+      scheduledSendAt: request.scheduledSendAt,
+      latestEventAt: request.latestEventAt,
+      eventCount: eventCountRow[0]?.value ?? 0,
+      statusHistoryCount: statusHistoryCountRow[0]?.value ?? 0,
+    });
+
+    if (!deletable) {
+      return res.status(409).json(errorResponse(reason!, 409));
+    }
+
+    await db.delete(listRequests).where(eq(listRequests.id, id));
+
+    res.json(successResponse({ id, deleted: true }));
+  } catch (error) {
+    console.error('Error deleting list request:', error);
+    res.status(500).json(errorResponse('Failed to delete list request'));
   }
 });
 
