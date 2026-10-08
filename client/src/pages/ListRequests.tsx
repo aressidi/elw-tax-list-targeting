@@ -9,19 +9,7 @@ import BulkEnqueueEmailDialog from '../components/BulkEnqueueEmailDialog';
 import EnqueueEmailDialog from '../components/EnqueueEmailDialog';
 import FileUploadDialog from '../components/FileUploadDialog';
 import ConfirmDialog from '../components/ConfirmDialog';
-
-// A request is deletable only before it has been started in any way. This
-// mirrors the server-side guard (DELETE /api/list-requests/:id) using the
-// fields the list row carries; the server stays authoritative and re-checks
-// the full condition (including audit-trail rows) before deleting.
-function isDeletable(request: ListRequestRow): boolean {
-  return (
-    request.requestStatus === 'not_started' &&
-    !request.emailSentAt &&
-    !request.queuedAt &&
-    !request.scheduledSendAt
-  );
-}
+import { isListRequestDeletable } from '@shared/listRequestDeletable';
 
 interface ListRequestRow {
   id: number;
@@ -274,7 +262,7 @@ export default function ListRequests() {
                         <Send className="w-3.5 h-3.5" />
                         {request.emailSentAt ? 'Resend' : 'Send'}
                       </button>
-                      {isDeletable(request) && (
+                      {isListRequestDeletable(request) && (
                         <button
                           onClick={() => {
                             setDeleteError(null);

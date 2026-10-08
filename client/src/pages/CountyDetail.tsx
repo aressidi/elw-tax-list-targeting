@@ -31,6 +31,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import ContactForm, { type ContactFormValues } from '../components/ContactForm';
 import SendEmailDialog from '../components/SendEmailDialog';
 import { useToast } from '../components/Toast';
+import { isListRequestDeletable } from '@shared/listRequestDeletable';
 
 function formatDateTime(value: string | null | undefined): string | null {
   if (!value) return null;
@@ -78,6 +79,9 @@ export default function CountyDetail() {
   const [confirmDeleteCounty, setConfirmDeleteCounty] = useState(false);
   const [showResearch, setShowResearch] = useState(false);
   const [sendingRequest, setSendingRequest] = useState<ListRequest | null>(null);
+  const [deletingRequest, setDeletingRequest] = useState<ListRequest | null>(null);
+  const [deleteRequestBusy, setDeleteRequestBusy] = useState(false);
+  const [deleteRequestError, setDeleteRequestError] = useState<string | null>(null);
 
   const { data: county, isLoading, isError, refetch } = useQuery({
     queryKey: ['county', countyId],
@@ -245,6 +249,26 @@ export default function CountyDetail() {
       toast.showError(error instanceof ApiError ? error.message : 'Failed to create list request.');
     },
   });
+
+  // Deleting an unstarted request mirrors ListRequests.tsx: call the authoritative
+  // DELETE route and surface any 409/error back inside the open ConfirmDialog
+  // (rather than a toast) so the user can read why and cancel.
+  const confirmDeleteRequest = async () => {
+    if (!deletingRequest) return;
+    setDeleteRequestBusy(true);
+    setDeleteRequestError(null);
+    try {
+      await apiSend(`/api/list-requests/${deletingRequest.id}`, 'DELETE');
+      setDeletingRequest(null);
+      invalidateCounty();
+      queryClient.invalidateQueries({ queryKey: ['list-requests'] });
+      toast.showSuccess('List request deleted.');
+    } catch (err) {
+      setDeleteRequestError(err instanceof ApiError ? err.message : 'Failed to delete list request.');
+    } finally {
+      setDeleteRequestBusy(false);
+    }
+  };
 
   const allListRequests = useMemo(() => {
     if (!county) return [];
@@ -570,15 +594,30 @@ export default function CountyDetail() {
                       </span>
                     )}
                   </p>
-                  <button
-                    onClick={() => setSendingRequest(request)}
-                    disabled={!countyHasEmailContact}
-                    title={!countyHasEmailContact ? 'No contact for this county has an email address on file' : undefined}
-                    className="inline-flex items-center gap-1.5 text-sm font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <Send className="w-3.5 h-3.5" />
-                    {request.emailSentAt ? 'Resend Email' : 'Send Email'}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {isListRequestDeletable(request) && (
+                      <button
+                        onClick={() => {
+                          setDeleteRequestError(null);
+                          setDeletingRequest(request);
+                        }}
+                        aria-label={`Delete list request #${request.id}`}
+                        className="inline-flex items-center gap-1.5 text-sm font-medium text-red-600 hover:text-red-800 px-3 py-1.5 rounded-lg hover:bg-red-50"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        Delete
+                      </button>
+                    )}
+                    <button
+                      onClick={() => setSendingRequest(request)}
+                      disabled={!countyHasEmailContact}
+                      title={!countyHasEmailContact ? 'No contact for this county has an email address on file' : undefined}
+                      className="inline-flex items-center gap-1.5 text-sm font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <Send className="w-3.5 h-3.5" />
+                      {request.emailSentAt ? 'Resend Email' : 'Send Email'}
+                    </button>
+                  </div>
                 </div>
               </div>
             ))}
@@ -648,6 +687,24 @@ export default function CountyDetail() {
           busy={deleteContact.isPending}
           onConfirm={() => deleteContact.mutate(deletingContact.id)}
           onCancel={() => setDeletingContact(null)}
+        />
+      )}
+
+      {deletingRequest && (
+        <ConfirmDialog
+          title="Delete list request"
+          message={
+            deleteRequestError
+              ? deleteRequestError
+              : `Delete request #${deletingRequest.id} for ${county.name}, ${county.state.abbreviation}? This request has not been started and will be permanently removed.`
+          }
+          confirmLabel="Delete"
+          busy={deleteRequestBusy}
+          onConfirm={confirmDeleteRequest}
+          onCancel={() => {
+            setDeletingRequest(null);
+            setDeleteRequestError(null);
+          }}
         />
       )}
 
